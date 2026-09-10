@@ -90,3 +90,34 @@ export function extract(buf, path) {
 
   return { schema: 1, path, callSites, exports, bytes: buf.length };
 }
+
+export function resolve(facts, file, ctx) {
+  const entities = [], edges = [];
+  for (const cs of facts?.callSites ?? []) {
+    const resolved = cs.pathTemplate !== null;
+    const fqn = `fe:${file.path}#L${cs.line}`;
+    entities.push({
+      fqn, kind: "HTTP_CALL_SITE", name: null, path: file.path, blobSha: file.blobSha,
+      startLine: cs.line, endLine: cs.line,
+      attrs: { method: cs.method, shape: cs.shape, raw: cs.raw, pathTemplate: cs.pathTemplate },
+      status: "OBSERVED", extractor: `${NAME}@${VERSION}`,
+      confidence: resolved ? 0.95 : 0.4,
+      // The "I don't know" node is a first-class citizen. Omitting these is what
+      // loses an engineer's trust; keeping them is what earns it.
+      resolution: resolved ? "EXACT" : "AMBIGUOUS",
+    });
+    if (!resolved) continue;
+    const norm = ctx.normalizeEndpoint(cs.pathTemplate);
+    const epFqn = `${cs.method ?? "ANY"} ${norm}`;
+    entities.push({
+      fqn: epFqn, kind: "HTTP_ENDPOINT", name: norm, path: null, blobSha: null,
+      startLine: null, endLine: null, attrs: { method: cs.method, normalized: norm },
+      status: "OBSERVED", extractor: `${NAME}@${VERSION}`,
+      confidence: 1.0, resolution: "EXACT", repoAgnostic: true,
+    });
+    edges.push({ kind: "TARGETS", srcFqn: fqn, dstFqn: epFqn,
+                 siteHash: ctx.siteHash(`${file.path}:${cs.line}:${cs.col}:TARGETS`),
+                 startLine: cs.line, confidence: 0.95, resolution: "EXACT" });
+  }
+  return { entities, edges };
+}

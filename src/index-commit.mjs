@@ -11,20 +11,22 @@
 import { resolveRef, listTree, readBlobs } from "./git.mjs";
 import { q, one, hex, upsertRepo, upsertCommit, touchRef } from "./db.mjs";
 import { cachedBlobs, registerBlobs, storeFacts, loadFacts, recordCommitFiles } from "./cache.mjs";
-import * as feHttp from "./extractors/fe-http.mjs";
+import * as feHttp     from "./extractors/fe-http.mjs";
+import * as beRoutes   from "./extractors/be-routes.mjs";
+import * as beSchema   from "./extractors/be-schema.mjs";
+import * as beExternal from "./extractors/be-external.mjs";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 
-const EXTRACTORS = [feHttp];
+const EXTRACTORS = [feHttp, beRoutes, beSchema, beExternal];
 const SECRET_PATHS = /(^|\/)(\.env|\.env\..*|.*\.pem|id_rsa.*|.*\.key|.*\.p12)$/;
 const MAX_BLOB_BYTES = 512 * 1024;
 
 const argv = process.argv.slice(2);
 const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i === -1 ? d : argv[i + 1]; };
 
-const siteHash = (p, line, col, kind) =>
-  hex(createHash("sha1").update(`${p}:${line}:${col}:${kind}`).digest("hex"));
+const siteHash = (key) => hex(createHash("sha1").update(String(key)).digest("hex"));
 
 /** Query-string keys are evidence, never part of path identity. */
 function normalizeEndpoint(raw) {
@@ -97,48 +99,37 @@ async function main() {
   }
 
   // ---------- PHASE 2: per-commit resolution ----------
-  const factMap = await loadFacts(
-    [...new Set(relevant.map((f) => f.blobSha))], feHttp.NAME, feHttp.VERSION);
-
-  const entities = new Map();  // fqn -> row
+  // Always re-runs COMPLETELY. Not "changed files + one hop": that heuristic misses
+  // two-hop invalidations, and a subtly stale edge is the one failure we cannot afford.
+  // This is pure in-memory work, so exactness is free.
+  const entities = new Map();          // fqn -> row (first writer wins)
   const edges = [];
-  const addEntity = (r) => { if (!entities.has(r.fqn)) entities.set(r.fqn, r); return r.fqn; };
+  const ctx = { siteHash, normalizeEndpoint };
+  const addEntity = (r) => { if (!entities.has(r.fqn)) entities.set(r.fqn, r); };
 
-  let resolvedCount = 0, unresolvedCount = 0;
-  for (const f of relevant) {
-    const facts = factMap.get(f.blobSha);
-    if (!facts?.callSites) continue;
-    for (const cs of facts.callSites) {
-      const resolved = cs.pathTemplate !== null;
-      const fqn = `fe:${f.path}#L${cs.line}`;
-      addEntity({
-        fqn, kind: "HTTP_CALL_SITE", name: null, path: f.path, blobSha: f.blobSha,
-        startLine: cs.line, endLine: cs.line,
-        attrs: { method: cs.method, shape: cs.shape, raw: cs.raw,
-                 pathTemplate: cs.pathTemplate },
-        status: "OBSERVED", extractor: `${feHttp.NAME}@${feHttp.VERSION}`,
-        confidence: resolved ? 0.95 : 0.4,
-        resolution: resolved ? "EXACT" : "AMBIGUOUS",
-      });
-
-      if (resolved) {
-        resolvedCount++;
-        const norm = normalizeEndpoint(cs.pathTemplate);
-        const epFqn = `${cs.method ?? "ANY"} ${norm}`;
-        addEntity({
-          fqn: epFqn, kind: "HTTP_ENDPOINT", name: norm, path: null, blobSha: null,
-          startLine: null, endLine: null, attrs: { method: cs.method, normalized: norm },
-          status: "OBSERVED", extractor: `${feHttp.NAME}@${feHttp.VERSION}`,
-          confidence: 1.0, resolution: "EXACT", repoAgnostic: true,
-        });
-        edges.push({ kind: "TARGETS", srcFqn: fqn, dstFqn: epFqn,
-                     siteHash: siteHash(f.path, cs.line, cs.col, "TARGETS"),
-                     startLine: cs.line, confidence: 0.95, resolution: "EXACT" });
-      } else {
-        unresolvedCount++;
-      }
+  const stats = {};
+  for (const ex of EXTRACTORS) {
+    if (typeof ex.resolve !== "function") continue;
+    const mine = relevant.filter((f) => ex.handles(f.path));
+    if (!mine.length) continue;
+    const facts = await loadFacts(
+      [...new Set(mine.map((f) => f.blobSha))], ex.NAME, ex.VERSION);
+    let n = 0;
+    for (const f of mine) {
+      const got = facts.get(f.blobSha);
+      if (!got) continue;
+      const out = ex.resolve(got, f, ctx);
+      out.entities.forEach(addEntity);
+      edges.push(...out.edges);
+      n += out.entities.length;
     }
+    stats[ex.NAME] = n;
   }
+
+  const unresolvedCount = [...entities.values()]
+    .filter((e) => e.kind === "HTTP_CALL_SITE" && e.resolution === "AMBIGUOUS").length;
+  const resolvedCount = [...entities.values()]
+    .filter((e) => e.kind === "HTTP_CALL_SITE" && e.resolution !== "AMBIGUOUS").length;
 
   // ---------- load ----------
   const ent = [...entities.values()];
@@ -148,16 +139,16 @@ async function main() {
       `insert into ckg.entities
          (repo_id, commit_sha, kind, fqn, name, path, blob_sha, start_line, end_line,
           attrs, status, extractor, confidence, resolution)
-       select $1, u.commit_sha, u.kind::ckg.entity_kind_t, u.fqn, u.name, u.path, u.blob_sha,
+       select u.repo_id, u.commit_sha, u.kind::ckg.entity_kind_t, u.fqn, u.name, u.path, u.blob_sha,
               u.start_line, u.end_line, u.attrs, u.status::ckg.epistemic_t, u.extractor,
               u.confidence, u.resolution::ckg.resolution_t
-         from unnest($2::bytea[], $3::text[], $4::text[], $5::text[], $6::text[], $7::bytea[],
-                     $8::int[], $9::int[], $10::jsonb[], $11::text[], $12::text[],
+         from unnest($1::int[], $2::bytea[], $3::text[], $4::text[], $5::text[], $6::text[],
+                     $7::bytea[], $8::int[], $9::int[], $10::jsonb[], $11::text[], $12::text[],
                      $13::numeric[], $14::text[])
-           as u(commit_sha, kind, fqn, name, path, blob_sha, start_line, end_line,
+           as u(repo_id, commit_sha, kind, fqn, name, path, blob_sha, start_line, end_line,
                 attrs, status, extractor, confidence, resolution)
        on conflict do nothing`,
-      [repoId,
+      [b.map((r) => (r.repoAgnostic ? null : repoId)),
        b.map((r) => (r.repoAgnostic ? null : hex(commit.sha))),
        b.map((r) => r.kind), b.map((r) => r.fqn), b.map((r) => r.name), b.map((r) => r.path),
        b.map((r) => (r.blobSha ? hex(r.blobSha) : null)),
@@ -169,7 +160,8 @@ async function main() {
 
   const idRows = await q(
     `select id, fqn from ckg.entities
-      where repo_id = $1 and (commit_sha = $2 or commit_sha is null)`,
+      where (repo_id = $1 or repo_id is null)
+        and (commit_sha = $2 or commit_sha is null)`,
     [repoId, hex(commit.sha)],
   );
   const ids = new Map(idRows.map((r) => [r.fqn, r.id]));
@@ -188,7 +180,7 @@ async function main() {
                      $9::numeric[], $10::text[])
            as u(kind, src, dst, site_hash, start_line, confidence, resolution)
        on conflict do nothing`,
-      [repoId, hex(commit.sha), `${feHttp.NAME}@${feHttp.VERSION}`,
+      [repoId, hex(commit.sha), 'multi',
        b.map((e) => e.kind), b.map((e) => ids.get(e.srcFqn)), b.map((e) => ids.get(e.dstFqn)),
        b.map((e) => e.siteHash), b.map((e) => e.startLine),
        b.map((e) => e.confidence), b.map((e) => e.resolution)],
@@ -209,6 +201,7 @@ async function main() {
     `${repoName}@${ref} ${commit.sha.slice(0, 8)}\n` +
     `  tree ${tree.length} files, ${relevant.length} relevant\n` +
     `  blobs: ${parsed} parsed, ${cached} cached (${pct}% cache hit)\n` +
+    `  by extractor: ${JSON.stringify(stats)}\n` +
     `  call sites: ${resolvedCount} resolved, ${unresolvedCount} UNRESOLVED\n` +
     `  loaded: ${ent.length} entities, ${edgeCount} edges in ${ms}ms`,
   );
