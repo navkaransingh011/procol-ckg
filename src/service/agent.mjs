@@ -8,6 +8,13 @@ import { chat, chatStream, provider } from "./llm.mjs";
 
 const MAX_ROUNDS = 6;
 
+// 'guided'  the SERVICE runs the tool chain; the model only writes prose over results
+//           it cannot influence. Works with ANY model, including weak free tiers,
+//           because nothing depends on the model calling tools correctly.
+// 'agent'   the model chooses tools. Needs a capable model; fails closed if it
+//           answers without calling any.
+const MODE = process.env.LLM_MODE || "guided";
+
 const SYSTEM = `You answer questions about the Procol codebase using ONLY the tools provided.
 
 HOW TO WORK
@@ -71,6 +78,7 @@ export async function ask({ question, refs = ["main"], emit }) {
   let toolCallCount = 0;
 
   if (p.mock) return mockRun({ question, refs, emit, t0 });
+  if (MODE === "guided") return guidedRun({ question, refs, emit, t0, p });
 
   const messages = [
     { role: "system", content: SYSTEM },
@@ -83,6 +91,20 @@ export async function ask({ question, refs = ["main"], emit }) {
     messages.push(msg);
 
     const calls = msg.tool_calls ?? [];
+    if (!calls.length && round === 0) {
+      // Fail closed. A model that answers without touching the graph is answering
+      // from generic React/Rails knowledge -- which is the exact failure this system
+      // exists to prevent. Do not let that reach the user as an answer.
+      emit({ type: "error", code: "model_skipped_tools",
+             message: "The model answered without querying the code graph, so the answer "
+                    + "would not be grounded in your codebase. Set LLM_MODE=guided to have "
+                    + "the service run the tool chain instead." });
+      const summary = { type: "done", claim_count: 0, evidence_count: 0, tool_calls: 0,
+                        unresolved_count: 0, refs, provider: `${p.base} ${p.model}`,
+                        ms: Date.now() - t0, failed: "model_skipped_tools" };
+      emit(summary);
+      return summary;
+    }
     if (!calls.length) {
       // No more tools wanted: stream the final answer.
       const finalMessages = [...messages.slice(0, -1),
@@ -182,6 +204,149 @@ async function mockRun({ question, refs, emit, t0 }) {
   const summary = { type: "done", claim_count: claims.length, evidence_count: ev.evidence.length,
                     tool_calls: 3, unresolved_count: (trace.unresolved ?? []).length,
                     refs, provider: "mock", ms: Date.now() - t0 };
+  emit(summary);
+  return summary;
+}
+
+/**
+ * GUIDED MODE — the service owns the tool chain; the model only narrates.
+ *
+ * This removes the single biggest risk with a cheap or free model: it cannot skip
+ * the graph, cannot pick the wrong tool, and cannot decline to report the gaps,
+ * because the gaps are computed here and emitted before it is asked anything.
+ * The model's only job is turning structured facts into a readable paragraph.
+ */
+async function guidedRun({ question, refs, emit, t0, p }) {
+  emit({ type: "status", text: "searching the code graph" });
+
+  // 1. anchor
+  const found = await findEntity({ query: question, limit: 8 });
+  let seed = found.matches.find((m) => m.kind === "HTTP_CALL_SITE")
+          ?? found.matches.find((m) => m.kind === "HANDLER")
+          ?? found.matches[0];
+
+  // Retry on the longest word if the whole question matched nothing.
+  if (!seed) {
+    const term = question.split(/[^\w./$-]+/).filter(Boolean).sort((a, b) => b.length - a.length)[0];
+    if (term) {
+      const retry = await findEntity({ query: term, limit: 8 });
+      seed = retry.matches[0];
+      if (seed) emit({ type: "status", text: `no match for the full question; matched on "${term}"` });
+    }
+  }
+  if (!seed) {
+    emit({ type: "token", text: "I have no evidence for this. Nothing in the indexed code graph "
+                               + "matches that question, so I cannot answer it from your codebase." });
+    const summary = { type: "done", claim_count: 0, evidence_count: 0, tool_calls: 1,
+                      unresolved_count: 0, refs, provider: `${p.base} ${p.model}`, ms: Date.now() - t0 };
+    emit(summary);
+    return summary;
+  }
+
+  if (found.weak) {
+    emit({ type: "status", text: `approximate match: ${seed.name || seed.fqn} (${seed.match_reason})` });
+  }
+
+  // 2. trace both ways
+  emit({ type: "status", text: `tracing from ${seed.name || seed.fqn}` });
+  const fwd = await traceFrom({ entity_id: Number(seed.id), refs, depth: 6, direction: "forward" });
+  const rev = await traceFrom({ entity_id: Number(seed.id), refs, depth: 3, direction: "reverse" });
+
+  // 3. evidence for everything we will cite
+  const ids = [Number(seed.id), ...fwd.nodes.map((n) => Number(n.id))].slice(0, 25);
+  const ev = await getEvidence({ ids });
+  for (const e of ev.evidence) {
+    emit({ type: "evidence", id: e.id, repo: e.repo, path: e.path, line: e.start_line,
+           commit: e.commit_sha?.slice(0, 8), ref: e.refs, extractor: e.extractor });
+  }
+
+  // 4. the gaps -- emitted BEFORE the model is asked anything, so they reach the
+  //    client whether or not the model mentions them.
+  for (const u of fwd.unresolved ?? []) emit({ type: "unresolved", ...u });
+  if (fwd.truncated) emit({ type: "truncated", reason: "node limit reached", at_depth: fwd.depth });
+  if (fwd.hubs_not_expanded?.length) {
+    emit({ type: "status", text: `not expanded through hubs: ${fwd.hubs_not_expanded.join(", ")}` });
+  }
+
+  // 5. structured claims, built from the graph -- not from the model
+  const claims = [{
+    id: "c1",
+    text: `${seed.kind} ${seed.name || seed.fqn}`
+        + (seed.path ? ` at ${seed.path}${seed.start_line ? ":" + seed.start_line : ""}` : ""),
+    evidence_ids: [Number(seed.id)],
+    confidence: Number(seed.confidence),
+  }];
+  fwd.nodes.forEach((n, i) => claims.push({
+    id: `c${i + 2}`,
+    text: `${n.kind} ${n.name || n.fqn}`
+        + (n.path ? ` at ${n.path}${n.line ? ":" + n.line : ""}` : ""),
+    evidence_ids: [Number(n.id)],
+    confidence: 0.95,
+  }));
+  for (const c of claims) emit({ type: "claim", ...c });
+
+  // 6. the model's ONLY job
+  const facts = {
+    question, refs,
+    anchor: { kind: seed.kind, name: seed.name || seed.fqn, path: seed.path,
+              line: seed.start_line, match_reason: seed.match_reason, attrs: seed.attrs },
+    downstream: fwd.nodes.map((n) => ({ depth: n.depth, kind: n.kind, name: n.name || n.fqn,
+                                        path: n.path, line: n.line })),
+    upstream_callers: rev.nodes.slice(0, 10).map((n) => ({ kind: n.kind, name: n.name || n.fqn,
+                                                           path: n.path, line: n.line })),
+    edge_chain: fwd.edges.map((e) => e.kind),
+    unresolved: fwd.unresolved ?? [],
+    truncated: !!fwd.truncated,
+    hubs_not_expanded: fwd.hubs_not_expanded ?? [],
+    approximate_match: !!found.weak,
+  };
+
+  const prompt = `Write a short answer to the question using ONLY the JSON facts below.
+
+STRICT RULES
+- Use only what is in the JSON. Invent nothing. You do not know this codebase otherwise.
+- Cite path:line exactly as given. A null path means an HTTP endpoint contract with no
+  source file -- say that, do not invent a path.
+- If "unresolved" is non-empty you MUST say the trace stops there and why.
+- If "truncated" is true, say the trace was bounded.
+- If "hubs_not_expanded" is non-empty, name them and say they were skipped because too
+  many things call them.
+- If "approximate_match" is true, open by saying the match was approximate.
+- Say which refs were read: ${refs.join(", ")}.
+- 6 sentences maximum. No preamble, no bullet lists.
+
+FACTS
+${JSON.stringify(facts, null, 1).slice(0, 12000)}`;
+
+  emit({ type: "status", text: `writing the answer (${p.model})` });
+  let text = "";
+  try {
+    for await (const delta of chatStream({
+      messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }],
+      max_tokens: 700,
+    })) { text += delta; emit({ type: "token", text: delta }); }
+
+    if (!text) {  // provider does not support streaming -- fall back to one shot
+      const msg = await chat({ messages: [{ role: "system", content: SYSTEM },
+                                          { role: "user", content: prompt }], max_tokens: 700 });
+      text = msg.content || "";
+      if (text) emit({ type: "token", text });
+    }
+  } catch (e) {
+    emit({ type: "error", code: "llm_failed", message: e.message });
+  }
+
+  // The claims and evidence above are already on the wire, so a model failure
+  // degrades to a structured answer without prose -- never to no answer at all.
+  if (!text) {
+    emit({ type: "token",
+           text: "(No prose available - the language model call failed. The claims and "
+               + "evidence above come from the code graph and are unaffected.)" });
+  }
+
+  const summary = { type: "done", claim_count: claims.length, evidence_count: ev.evidence.length,
+                    tool_calls: 4, unresolved_count: (fwd.unresolved ?? []).length,
+                    refs, provider: `${p.base} · ${p.model}`, mode: "guided", ms: Date.now() - t0 };
   emit(summary);
   return summary;
 }
