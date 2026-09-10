@@ -1,0 +1,73 @@
+# COPY THIS INTO procol-client-dashboard AND procol-backend (.github/workflows/).
+# Fires the moment a merge lands on a deployed ref. Nothing else is indexed.
+name: CKG index
+
+on:
+  push:
+    branches:
+      - main
+      - reliance-main
+      - ril-ppd-final
+      - ril-qa-final
+      - ril-dev-final
+      - jindal-sandbox
+      - rfx-qa-main
+      - saint-gobain-demo
+      - demo-main
+  workflow_dispatch:
+    inputs:
+      ref: { description: "Ref to index", required: true, default: "main" }
+
+concurrency:
+  # One run per ref. A rapid second merge supersedes the first instead of racing it.
+  group: ckg-index-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Only the indexed commit's tree is needed -- ls-tree reads one commit.
+          fetch-depth: 1
+          path: target
+
+      - uses: actions/checkout@v4
+        with:
+          repository: procol-tech/procol-ckg
+          token: ${{ secrets.CKG_REPO_TOKEN }}
+          path: ckg
+
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: "npm", cache-dependency-path: ckg/package-lock.json }
+
+      - run: npm ci --omit=dev
+        working-directory: ckg
+
+      - name: Index this commit
+        working-directory: ckg
+        env:
+          CKG_DATABASE_URL: ${{ secrets.CKG_DATABASE_URL }}
+        run: |
+          node src/index-commit.mjs \
+            --repo-dir ../target \
+            --ref "${{ github.event.inputs.ref || github.ref_name }}" \
+            --trigger push \
+            | tee "$GITHUB_STEP_SUMMARY"
+
+      # Fails loudly if the cache stopped working -- a silent regression here means
+      # every merge re-parses the whole repo and nobody notices until the bill arrives.
+      - name: Assert cache is healthy
+        working-directory: ckg
+        env:
+          CKG_DATABASE_URL: ${{ secrets.CKG_DATABASE_URL }}
+        run: |
+          HIT=$(psql "$CKG_DATABASE_URL" -Atc "
+            select coalesce(round(100.0*blobs_cached/nullif(blobs_cached+blobs_parsed,0)),0)
+            from ckg.index_runs order by id desc limit 1")
+          echo "cache hit: ${HIT}%"
+          if [ "${HIT%.*}" -lt 50 ]; then
+            echo "::warning::Cache hit ${HIT}% — expected >50% on an established ref."
+          fi

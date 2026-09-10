@@ -1,0 +1,92 @@
+// PER-BLOB extractor: frontend HTTP call sites.
+// Depends ONLY on this file's bytes -- which is what makes it cacheable by blob SHA.
+//
+// v0.1 is regex-based on purpose: it exists to prove the pipeline end to end and to
+// produce real coverage numbers on day 1. When the Babel version lands, bump VERSION
+// to "1.0-babel" and every blob re-extracts automatically. Nothing else changes.
+
+export const NAME = "fe-http";
+export const VERSION = "0.1-regex";
+
+export function handles(path) {
+  return /\.(js|jsx)$/.test(path) && !path.includes("node_modules");
+}
+
+const CALL = /promisifiedXHR\s*\(/g;
+
+function classify(arg) {
+  const a = arg.trim();
+  if (a.startsWith("`")) return "TEMPLATE";
+  if (a.startsWith('"') || a.startsWith("'")) return "LITERAL";
+  if (/^[A-Za-z_$][\w$]*$/.test(a)) return "IDENTIFIER";
+  return "OTHER";
+}
+
+/** Template literal -> path template: static parts kept, every ${...} becomes '*'. */
+function foldTemplate(raw) {
+  const inner = raw.slice(1, -1);
+  return inner.replace(/\$\{[^}]*\}/g, "*");
+}
+
+function readArg(src, openIdx) {
+  // Walk to the matching paren, tracking nesting and strings, and split the first arg.
+  let depth = 0, i = openIdx, quote = null, argStart = openIdx + 1;
+  for (; i < src.length; i++) {
+    const c = src[i];
+    if (quote) {
+      if (c === "\\") { i++; continue; }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") { quote = c; continue; }
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") {
+      depth--;
+      if (depth === 0) return src.slice(argStart, i);
+    } else if (c === "," && depth === 1) {
+      return src.slice(argStart, i);
+    }
+  }
+  return null;
+}
+
+export function extract(buf, path) {
+  const src = buf.toString("utf8");
+  const lineStarts = [0];
+  for (let i = 0; i < src.length; i++) if (src[i] === "\n") lineStarts.push(i + 1);
+  const lineOf = (idx) => {
+    let lo = 0, hi = lineStarts.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; lineStarts[mid] <= idx ? (lo = mid) : (hi = mid - 1); }
+    return { line: lo + 1, col: idx - lineStarts[lo] };
+  };
+
+  const callSites = [];
+  CALL.lastIndex = 0;
+  let m;
+  while ((m = CALL.exec(src)) !== null) {
+    const openIdx = m.index + m[0].length - 1;
+    const arg = readArg(src, openIdx);
+    if (arg === null) continue;
+    const shape = classify(arg);
+    const { line, col } = lineOf(m.index);
+
+    // Second arg is the HTTP verb in this codebase's convention.
+    const after = src.slice(openIdx, openIdx + 400);
+    const verbMatch = after.match(/,\s*["'](GET|POST|PUT|PATCH|DELETE)["']/i);
+
+    callSites.push({
+      line, col,
+      method: verbMatch ? verbMatch[1].toUpperCase() : null,
+      shape,
+      raw: arg.trim().slice(0, 200),
+      pathTemplate:
+        shape === "LITERAL"  ? arg.trim().slice(1, -1) :
+        shape === "TEMPLATE" ? foldTemplate(arg.trim()) : null,
+    });
+  }
+
+  const exports = [...src.matchAll(/export\s+(?:const|function|default|class)\s+([\w$]+)/g)]
+    .map((x) => x[1]);
+
+  return { schema: 1, path, callSites, exports, bytes: buf.length };
+}

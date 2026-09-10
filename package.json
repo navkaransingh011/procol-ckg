@@ -1,0 +1,11 @@
+{
+  "name": "procol-ckg",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "migrate": "psql \"$CKG_DATABASE_URL\" -v ON_ERROR_STOP=1 -f sql/001_core.sql -f sql/002_incremental.sql",
+    "index": "node src/index-commit.mjs"
+  },
+  "dependencies": { "pg": "^8.13.1" }
+}
