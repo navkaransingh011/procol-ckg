@@ -7,5 +7,8 @@
     "migrate": "psql \"$CKG_DATABASE_URL\" -v ON_ERROR_STOP=1 -f sql/001_core.sql -f sql/002_incremental.sql",
     "index": "node src/index-commit.mjs"
   },
-  "dependencies": { "pg": "^8.13.1" }
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "pg": "^8.13.1"
+  }
 }
