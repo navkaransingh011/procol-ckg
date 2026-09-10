@@ -54,7 +54,10 @@ export async function touchRef(repoId, refName, sha, tenant, env) {
   await q(
     `insert into ckg.ref_history (repo_id, ref_name, commit_sha, tenant, env)
      values ($1,$2,$3,$4,$5)
-     on conflict (repo_id, ref_name, commit_sha) do update set last_seen = now()`,
+     on conflict (repo_id, ref_name, commit_sha) do update
+       set last_seen = now(),
+           tenant = coalesce(excluded.tenant, ckg.ref_history.tenant),
+           env    = coalesce(excluded.env,    ckg.ref_history.env)`,
     [repoId, refName, hex(sha), tenant ?? null, env ?? null],
   );
 }

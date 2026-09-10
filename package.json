@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "migrate": "psql \"$CKG_DATABASE_URL\" -v ON_ERROR_STOP=1 -f sql/001_core.sql -f sql/002_incremental.sql",
-    "index": "node src/index-commit.mjs"
+    "index": "node src/index-commit.mjs",
+    "serve": "node src/service/server.mjs",
+    "mcp": "node src/mcp-server.mjs",
+    "index:all": "node src/index-all.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

@@ -33,7 +33,8 @@ for (const [repo, refs] of Object.entries(cfg)) {
 
     try {
       const out = execFileSync("node", [path.join(HERE, "index-commit.mjs"),
-        "--repo-dir", dir, "--ref", target, "--trigger", "backfill"],
+        "--repo-dir", dir, "--ref", target, "--trigger", "backfill",
+        ...(tenant ? ["--tenant", tenant] : []), ...(env ? ["--env", env] : [])],
         { encoding: "utf8", env: process.env });
       const hit = out.match(/\((\d+)% cache hit\)/)?.[1] ?? "?";
       const ents = out.match(/loaded: (\d+) entities/)?.[1] ?? "?";

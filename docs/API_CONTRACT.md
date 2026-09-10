@@ -77,3 +77,32 @@ Response: `text/event-stream`, one JSON object per `data:` line. Use
 
 Useful as the module's empty state: if `entities` is 0 the graph is not loaded, which
 is a different message from "no answer found".
+
+---
+
+## Running it
+
+```bash
+# no model, no key -- for building the FE
+CKG_DATABASE_URL=postgres://localhost/ckg npm run serve
+
+# local model, still no key
+LLM_BASE_URL=http://localhost:11434/v1 LLM_MODEL=qwen2.5:7b-instruct \
+CKG_DATABASE_URL=postgres://localhost/ckg npm run serve
+
+# your own project key
+LLM_BASE_URL=https://api.openai.com/v1 LLM_MODEL=gpt-4.1-mini LLM_API_KEY=sk-... \
+CKG_DATABASE_URL=postgres://localhost/ckg npm run serve
+```
+
+`LLM_BASE_URL=mock` (the default) runs a **fixed tool chain** and emits every event
+type in the contract, with every claim prefixed `[MOCK]`. The dashboard module can be
+built, styled and reviewed against it before any model or key exists.
+
+| Env | Default | Notes |
+|---|---|---|
+| `PORT` | `8787` | binds `127.0.0.1` only |
+| `CKG_ALLOWED_ORIGIN` | `http://localhost:3000` | the dashboard's dev origin |
+| `CKG_AUTH_MODE` | `dev` | `dev` accepts any token and says so in the stream. Use `procol` anywhere reachable |
+| `CKG_PROCOL_VERIFY_URL` | — | required when `CKG_AUTH_MODE=procol` |
+| `LLM_AZURE_API_VERSION` | — | set it to switch to Azure's `api-key` header + `?api-version=` |

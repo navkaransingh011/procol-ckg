@@ -44,6 +44,8 @@ async function main() {
   const repoDir = arg("repo-dir");
   const ref = arg("ref", "HEAD");
   const trigger = arg("trigger", "manual");
+  const tenant = arg("tenant", null);
+  const env = arg("env", null);
   if (!repoDir) throw new Error("--repo-dir is required");
 
   const t0 = Date.now();
@@ -52,7 +54,7 @@ async function main() {
 
   const repoId = await upsertRepo("procol", repoName, repoName.includes("backend") ? "monolith" : "spa");
   await upsertCommit(repoId, commit.sha, commit.committedAt, commit.subject, null);
-  await touchRef(repoId, ref.replace(/^origin\//, ""), commit.sha, null, null);
+  await touchRef(repoId, ref.replace(/^origin\//, ""), commit.sha, tenant, env);
 
   const run = await one(
     `insert into ckg.index_runs (repo_id, commit_sha, ref_name, trigger) values ($1,$2,$3,$4) returning id`,
