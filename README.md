@@ -37,9 +37,10 @@ cannot afford. Full re-resolution is exact and costs milliseconds.
 | `reliance-main` | 758 | 827 | 52% | 242ms |
 | `ril-qa-final` | 67 | 1532 | 96% | 173ms |
 | `jindal-sandbox` | 231 | 1679 | 88% | 198ms |
-| `feat/po-amendment` | **52** | 1729 | **97%** | **178ms** |
 
-8,704 file instances across 5 refs collapse to 2,915 distinct blobs — **67% dedup**.
+15,279 file instances across the 10 deployed refs collapse to 2,915 distinct blobs — **77% dedup**.
+
+The incremental case, on a deployed ref: `ril-ppd-final` parses **31 of 1,599** files (98% cached) in 175ms.
 
 ## Rules
 
