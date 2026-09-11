@@ -54,7 +54,7 @@ jobs:
             --zone "${{ vars.VM_ZONE }}" \
             --tunnel-through-iap \
             --quiet \
-            --command "CKG_REPO_DIR=${{ vars.VM_REPO_DIR }} bash ${{ vars.VM_REPO_DIR }}/deploy/vm-deploy.sh ${{ github.sha }}"
+            --command "bash -lc 'CKG_REPO_DIR=${{ vars.VM_REPO_DIR }} bash ${{ vars.VM_REPO_DIR }}/deploy/vm-deploy.sh ${{ github.sha }}'"
 
       - name: Report
         if: always()
