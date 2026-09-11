@@ -513,6 +513,8 @@ HOW TO READ THE FACTS
   "node_resolution" = how the NODE is known), "upstream_callers", optional "columns", "defects",
   "unresolved", "truncated", "hubs_not_expanded", and "match" (exact | approximate | none).
 - For a CALLS hop, edge_resolution is what matters: RUNTIME means that call was OBSERVED during a real test run.
+  If the hop also carries "observed_at", the observation was made on that earlier commit and carried forward
+  because both files are unchanged since -- say "observed in tests at <observed_at>; code unchanged since".
 - Resolutions tell you HOW a fact is known. Treat them differently and say which when it matters:
     RUNTIME        observed during real test execution -- strongest evidence
     EXACT / FRAMEWORK_DUMP   read directly from source structure or from Rails' own route table -- reliable
@@ -564,6 +566,9 @@ HARD RULES
 - If "truncated" is true or "hubs_not_expanded" is non-empty, say so.
 - Name the refs read: they are in facts.refs. Tenants run different code.
 - Prefer precision over completeness. A shorter correct answer beats a longer padded one.
+- Never enumerate more than 12 items inline. Name the 12 most relevant, then say "and N more" with the
+  exact count from the facts. Long lists crowd out sections 4-6, and an answer cut off before section 5
+  hides the gaps -- the one thing this system must never do.
 
 OVERVIEW QUESTIONS ("how does X work", "what is X", "explain X")
 - Section 1 becomes a plain-English explanation for a non-engineer, 4-8 sentences: what it lets a user do,
@@ -619,9 +624,11 @@ async function lookupOne(qstr, refs, emit, seen) {
   }
   const edgeInto = new Map(fwd.edges.map(e => [String(e.dst), e.kind]));
   const edgeResInto = new Map(fwd.edges.map(e => [String(e.dst), e.resolution]));
+  const edgeObsInto = new Map(fwd.edges.filter(e => e.observed_at).map(e => [String(e.dst), e.observed_at]));
   const hop = (n, i) => ({ kind: n.kind, name: n.name || n.fqn, path: n.path, line: n.line,
                             edge: edgeInto.get(String(n.id)) || null,
                             edge_resolution: edgeResInto.get(String(n.id)) || null,   // RUNTIME = observed in tests
+                            ...(edgeObsInto.has(String(n.id)) ? { observed_at: edgeObsInto.get(String(n.id)).slice(0, 8) } : {}),
                             node_resolution: n.resolution, depth: n.depth });
   // claims for the UI (dedupe across lookups)
   const claimOf = (n, edge) => ({ id: `c${n.id}`, text: `${n.kind} ${n.name || n.fqn}` + (n.path ? ` at ${n.path}${n.line ? ":" + n.line : ""}` : ""),

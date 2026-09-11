@@ -15,12 +15,13 @@ import * as feHttp     from "./extractors/fe-http.mjs";
 import * as beRoutes   from "./extractors/be-routes.mjs";
 import * as beSchema   from "./extractors/be-schema.mjs";
 import * as beExternal from "./extractors/be-external.mjs";
+import * as beAst      from "./extractors/be-ast.mjs";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { normalizeEndpoint } from "./normalize.mjs";
 
-const EXTRACTORS = [feHttp, beRoutes, beSchema, beExternal];
+const EXTRACTORS = [feHttp, beRoutes, beSchema, beExternal, beAst];
 const SECRET_PATHS = /(^|\/)(\.env|\.env\..*|.*\.pem|id_rsa.*|.*\.key|.*\.p12)$/;
 // What gets its TEXT stored (so the agent can read and grep it without a clone).
 const SOURCE_DIRS = /^(app|lib|config|db|src|spec|test)\//;
@@ -58,6 +59,63 @@ const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i === -1 ? d : 
 
 const siteHash = (key) => hex(createHash("sha1").update(String(key)).digest("hex"));
 
+
+/**
+ * Observed evidence survives a re-index when the code it was observed in did not change.
+ * Runtime CALLS edges and OBSERVED_DEFECT nodes come from test-run tracing, which does not re-run on
+ * every merge. For the new commit, copy each such edge from the previous commit when BOTH endpoint
+ * symbols still exist AND their files have identical content (same blob hash). Edges touching a
+ * changed file are dropped -- the body changed, the observation may no longer hold. Copies keep
+ * attrs.observed_at = the commit the evidence was actually captured on, so answers can say so.
+ */
+async function inheritObserved(repoId, newSha, prevSha) {
+  if (!prevSha || prevSha === newSha) return { calls: 0, defects: 0, defect_edges: 0, dropped: 0 };
+  const params = [repoId, hex(prevSha), hex(newSha)];
+  // pairs of (old id -> new id) for symbols whose file content is unchanged
+  const same = `select o.id as old_id, n.id as new_id from ckg.entities o
+                  join ckg.entities n on n.repo_id = o.repo_id and n.kind = o.kind and n.fqn = o.fqn
+                                     and n.commit_sha = $3 and n.blob_sha is not distinct from o.blob_sha
+                 where o.repo_id = $1 and o.commit_sha = $2 and o.blob_sha is not null`;
+  const [{ n: candidates }] = await q(`select count(*)::int n from ckg.edges g where g.repo_id=$1 and g.commit_sha=$2 and g.kind='CALLS' and g.resolution='RUNTIME'`, [repoId, hex(prevSha)]);
+  const calls = await q(
+    `with same as (${same})
+     insert into ckg.edges (repo_id, commit_sha, kind, src_entity_id, dst_entity_id, site_hash, start_line, end_line,
+                            guard_expr, attrs, status, extractor, confidence, resolution)
+     select $1, $3, g.kind, s.new_id, d.new_id, g.site_hash, g.start_line, g.end_line, g.guard_expr,
+            coalesce(g.attrs,'{}'::jsonb) || jsonb_build_object('observed_at', coalesce(g.attrs->>'observed_at', encode($2,'hex')), 'inherited', true),
+            g.status, g.extractor, g.confidence, g.resolution
+       from ckg.edges g join same s on s.old_id = g.src_entity_id join same d on d.old_id = g.dst_entity_id
+      where g.repo_id = $1 and g.commit_sha = $2 and g.kind = 'CALLS' and g.resolution = 'RUNTIME'
+     on conflict do nothing returning 1`, params);
+  // defects: copy the node when the symbol it hangs off is unchanged, then the edge
+  const defects = await q(
+    `with same as (${same}),
+     src_defects as (
+       select distinct df.id as old_id from ckg.edges g join ckg.entities df on df.id = g.dst_entity_id
+        where g.repo_id = $1 and g.commit_sha = $2 and g.kind = 'TRIGGERS_DEFECT' and df.kind = 'OBSERVED_DEFECT'
+          and g.src_entity_id in (select old_id from same))
+     insert into ckg.entities (repo_id, commit_sha, kind, fqn, name, path, blob_sha, start_line, end_line, attrs, status, extractor, confidence, resolution)
+     select df.repo_id, $3, df.kind, df.fqn, df.name, df.path, df.blob_sha, df.start_line, df.end_line,
+            coalesce(df.attrs,'{}'::jsonb) || jsonb_build_object('observed_at', coalesce(df.attrs->>'observed_at', encode($2,'hex')), 'inherited', true),
+            df.status, df.extractor, df.confidence, df.resolution
+       from ckg.entities df where df.id in (select old_id from src_defects)
+     on conflict do nothing returning 1`, params);
+  const defectEdges = await q(
+    `with same as (${same}),
+     newdef as (select o.id as old_id, n.id as new_id from ckg.entities o
+                  join ckg.entities n on n.repo_id = o.repo_id and n.kind = o.kind and n.fqn = o.fqn and n.commit_sha = $3
+                 where o.repo_id = $1 and o.commit_sha = $2 and o.kind = 'OBSERVED_DEFECT')
+     insert into ckg.edges (repo_id, commit_sha, kind, src_entity_id, dst_entity_id, site_hash, start_line, end_line,
+                            guard_expr, attrs, status, extractor, confidence, resolution)
+     select $1, $3, g.kind, s.new_id, d.new_id, g.site_hash, g.start_line, g.end_line, g.guard_expr,
+            coalesce(g.attrs,'{}'::jsonb) || jsonb_build_object('observed_at', coalesce(g.attrs->>'observed_at', encode($2,'hex')), 'inherited', true),
+            g.status, g.extractor, g.confidence, g.resolution
+       from ckg.edges g join same s on s.old_id = g.src_entity_id join newdef d on d.old_id = g.dst_entity_id
+      where g.repo_id = $1 and g.commit_sha = $2 and g.kind = 'TRIGGERS_DEFECT'
+     on conflict do nothing returning 1`, params);
+  return { calls: calls.length, defects: defects.length, defect_edges: defectEdges.length, dropped: candidates - calls.length, from: prevSha.slice(0, 8) };
+}
+
 async function main() {
   const repoDir = arg("repo-dir");
   const ref = arg("ref", "HEAD");
@@ -81,7 +139,9 @@ async function main() {
   if (cur && cur.sha !== commit.sha && !argv.includes("--force")) {
     const [imp] = await q(`select count(*)::int n from ckg.entities where repo_id=$1 and commit_sha=decode($2,'hex') and extractor like 'kb-import%'`, [repoId, cur.sha]);
     if (imp.n > 0) {
-      console.error(`refusing: ${repoName}@${refName0} points at imported commit ${cur.sha.slice(0,8)} (${imp.n} imported entities). Re-index would drop them. Pass --force to override.`);
+      console.error(`refusing: ${repoName}@${refName0} points at imported commit ${cur.sha.slice(0,8)}. Ruby symbols regenerate (be-ast) and runtime `
+                  + `calls/defects are carried forward for unchanged files, but features/owners, summaries and embeddings `
+                  + `are not yet re-derived by this run (the reindex job will). Pass --force to move the ref anyway.`);
       process.exit(3);
     }
   }
@@ -120,17 +180,30 @@ async function main() {
     if (misses.length) {
       const contents = await readBlobs(repoDir, misses);
       const rows = [];
-      for (const sha of misses) {
-        const buf = contents.get(sha);
-        if (!buf) continue;
-        const anyPath = mine.find((f) => f.blobSha === sha)?.path ?? "";
+      const pathOf = (sha) => mine.find((f) => f.blobSha === sha)?.path ?? "";
+      if (typeof ex.extractBatch === "function") {
+        // One process for the whole batch (the Ruby AST extractor): thousands of files in seconds.
         const s = Date.now();
-        try {
-          rows.push({ blobSha: sha, extractor: ex.NAME, version: ex.VERSION,
-                      facts: ex.extract(buf, anyPath), parseOk: true, durationMs: Date.now() - s });
-        } catch (err) {
-          rows.push({ blobSha: sha, extractor: ex.NAME, version: ex.VERSION,
-                      facts: {}, parseOk: false, parseError: String(err.message).slice(0, 500) });
+        const items = misses.filter((sha) => contents.get(sha)).map((sha) => ({ sha, buf: contents.get(sha), path: pathOf(sha) }));
+        const res = ex.extractBatch(items);
+        const per = items.length ? Math.round((Date.now() - s) / items.length) : 0;
+        for (const it of items) {
+          const r = res.get(it.sha);
+          rows.push({ blobSha: it.sha, extractor: ex.NAME, version: ex.VERSION, facts: r.facts,
+                      parseOk: !!r.ok, parseError: r.ok ? undefined : String(r.error).slice(0, 500), durationMs: per });
+        }
+      } else {
+        for (const sha of misses) {
+          const buf = contents.get(sha);
+          if (!buf) continue;
+          const s = Date.now();
+          try {
+            rows.push({ blobSha: sha, extractor: ex.NAME, version: ex.VERSION,
+                        facts: ex.extract(buf, pathOf(sha)), parseOk: true, durationMs: Date.now() - s });
+          } catch (err) {
+            rows.push({ blobSha: sha, extractor: ex.NAME, version: ex.VERSION,
+                        facts: {}, parseOk: false, parseError: String(err.message).slice(0, 500) });
+          }
         }
       }
       await storeFacts(rows);
@@ -187,7 +260,10 @@ async function main() {
                      $13::numeric[], $14::text[])
            as u(repo_id, commit_sha, kind, fqn, name, path, blob_sha, start_line, end_line,
                 attrs, status, extractor, confidence, resolution)
-       on conflict do nothing`,
+       on conflict ((coalesce(repo_id,0)), (coalesce(commit_sha,'\\x00'::bytea)), kind, fqn) do update
+         set end_line   = coalesce(ckg.entities.end_line,   excluded.end_line),
+             start_line = coalesce(ckg.entities.start_line, excluded.start_line),
+             blob_sha   = coalesce(ckg.entities.blob_sha,   excluded.blob_sha)`,
       [b.map((r) => (r.repoAgnostic ? null : repoId)),
        b.map((r) => (r.repoAgnostic ? null : hex(commit.sha))),
        b.map((r) => r.kind), b.map((r) => r.fqn), b.map((r) => r.name), b.map((r) => r.path),
@@ -227,6 +303,10 @@ async function main() {
     );
     edgeCount += b.length;
   }
+
+  const inherited = await inheritObserved(repoId, commit.sha, cur?.sha);
+  if (inherited.calls || inherited.dropped || inherited.defects)
+    console.log(`  observed evidence carried from ${inherited.from}: ${inherited.calls} runtime calls, ${inherited.defects} defects (${inherited.defect_edges} links); ${inherited.dropped} runtime calls dropped (file changed)`);
 
   const ms = Date.now() - t0;
   await q(

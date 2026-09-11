@@ -129,6 +129,46 @@ npm run fe:build          # writes fe/dist; the service then serves it at http:/
 In production the service serves `fe/dist` itself, so UI and API are one process and one origin.
 Set `CKG_HOST=0.0.0.0` only if no reverse proxy sits in front; the default binds to localhost.
 
+## Deploying
+
+Merging to `main` auto-deploys to the VM: `.github/workflows/deploy-vm.yml` connects over an IAP
+tunnel (Workload Identity Federation, no stored keys) and runs `deploy/vm-deploy.sh` -- pull, build,
+migrate, restart, health-check, roll back on failure. Setup and the exact auth required are in
+[docs/CI_DEPLOY.md](docs/CI_DEPLOY.md). The bootstrap dump is never re-loaded; schema changes travel
+as idempotent `sql/0NN_*.sql` migrations.
+
+## Ruby symbols (be-ast)
+
+`src/extractors/be-ast.{mjs,rb}` regenerates every backend SYMBOL node (classes, modules, instance and
+class methods) from source, replacing the one-off Ruby AST dump the graph was bootstrapped from. So a
+re-index of any backend commit produces the symbols itself; nothing depends on the dump any more.
+
+- Stdlib `RubyVM::AbstractSyntaxTree`, no gems. One Ruby process per run parses ~4,000 files in under 2 s.
+- Identities match the import exactly (`be:sym:Class`, `Class#method`, `Class.method`), and the
+  class->method DECLARES hash is the same, so wiring it into the pinned commit added zero duplicates.
+- Files the running Ruby cannot parse (Ruby 3 syntax on Ruby 2.6) fall back to a line scanner and are
+  marked HEURISTIC. Use Ruby 3.x on the indexing host to avoid the fallback entirely.
+- Controllers bridge to their HANDLER node (`api/v1/trade#quote_details` -> `Api::V1::TradeController#quote_details`).
+- Static `Const.method` CALLS edges exist behind `CKG_STATIC_CALLS=1` and are off by default: runtime
+  (observed) CALLS edges are the trustworthy ones.
+
+Parity against the bootstrap dump (`node src/dev/ast-parity.mjs`): 98.4% of its 23,490 symbols, and the
+gap is mostly the dump's own errors -- methods inside `class << self` labelled as instance methods (we
+emit the correct class-method form) and ownerless top-level script methods (dropped; they collide by name).
+Not covered yet: the 26 `mcp_tool` definitions, which are not Ruby symbols and need their own extractor.
+
+## Observed evidence across commits
+
+Runtime CALLS edges and OBSERVED_DEFECT nodes come from test-run tracing, which does not re-run on every
+merge. When a branch moves to a new commit, the indexer **carries each such edge forward if both endpoint
+symbols still exist and their files have identical content** (same blob hash), tagging it
+`attrs.observed_at = <commit it was captured on>`. Edges touching a changed file are dropped: the body
+changed, the observation may no longer hold. Traces expose `observed_at`, and answers say "observed in
+tests at <commit>; code unchanged since". Simulated on a 185-file diff: 1,494 carried, 2,950 dropped for
+changed files, 139 for removed symbols, 0 for any other reason. A typical merge keeps ~99%.
+
+Fresh evidence for changed code still needs the tracing harness to run on merge (not in this repo yet).
+
 ## Self-contained database
 
 The indexer stores the text of every source file it sees (`ckg.blob_text`, content-addressed), so READ

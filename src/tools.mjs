@@ -138,6 +138,7 @@ export async function traceFrom({
        -- is direction-agnostic and the SERVES flip is handled once, here.
        select g.id as edge_id, g.kind::text as kind, g.confidence, g.guard_expr, g.start_line,
               encode(g.commit_sha,'hex') as commit_sha, g.resolution::text as resolution,
+              g.attrs->>'observed_at' as observed_at,
               case when g.kind::text = any($2::text[]) then g.src_entity_id else g.dst_entity_id end as from_id,
               case when g.kind::text = any($2::text[]) then g.dst_entity_id else g.src_entity_id end as to_id
          from ckg.edges g
@@ -147,12 +148,12 @@ export async function traceFrom({
      ), walk as (
        select * from (
          with recursive w as (
-           select h.edge_id, h.kind, h.confidence, h.guard_expr, h.start_line, h.commit_sha, h.resolution,
+           select h.edge_id, h.kind, h.confidence, h.guard_expr, h.start_line, h.commit_sha, h.resolution, h.observed_at,
                   h.from_id as src, h.to_id as dst, 1 as depth,
                   array[h.from_id, h.to_id] as path
              from hops h where h.from_id = $1
            union all
-           select h.edge_id, h.kind, h.confidence, h.guard_expr, h.start_line, h.commit_sha, h.resolution,
+           select h.edge_id, h.kind, h.confidence, h.guard_expr, h.start_line, h.commit_sha, h.resolution, h.observed_at,
                   h.from_id, h.to_id, w.depth + 1, w.path || h.to_id
              from w join hops h on h.from_id = w.dst
             where w.depth < $6
@@ -192,6 +193,7 @@ export async function traceFrom({
       id: r.edge_id, kind: r.kind, src: r.src, dst: r.dst,
       confidence: Number(r.confidence), guard: r.guard_expr, resolution: r.resolution,
       line: r.start_line, commit: r.commit_sha,
+      ...(r.observed_at ? { observed_at: r.observed_at } : {}),   // RUNTIME evidence carried from an earlier commit
     })),
     // Three states the caller MUST be able to distinguish, because collapsing
     // them is the core dishonesty risk.

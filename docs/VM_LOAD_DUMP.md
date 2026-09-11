@@ -43,7 +43,7 @@ PGPASSWORD='OWNER_PASSWORD' psql -U ckg -h localhost -d ckg -Atc "select
   (select count(*) from ckg.embeddings),
   (select count(*) from ckg.blob_text)"
 ```
-Expected: `38354|165281|165|26487|8894`
+Expected: `38516|165443|165|26487|8894`
 
 ## 5. Read-only role settings (not carried by a dump) + write test must fail
 ```
@@ -60,7 +60,7 @@ CKG_DATABASE_URL=postgres://ckg:OWNER_PASSWORD@localhost/ckg
 CKG_READER_URL=postgres://ckg_reader:READER_PASSWORD@localhost/ckg
 LLM_BASE_URL=http://slingring.procol.tech/v1
 LLM_MODEL=FAST_SMALLER
-LLM_API_KEY=PROJECT_SLINGRING_KEY
+LLM_API_KEY=sk-REPLACE_WITH_REAL_PROJECT_KEY
 LLM_MODE=auto
 EMBED_PROVIDER=local
 EMBED_MODEL=Xenova/bge-small-en-v1.5
@@ -69,8 +69,10 @@ PORT=8787
 CKG_HOST=127.0.0.1
 ENV
 chmod 600 .env
-curl -s -m 10 http://slingring.procol.tech/v1/models -H "Authorization: Bearer PROJECT_SLINGRING_KEY"   # must list models: VM can reach Slingring
-npm test                                                                                                  # 17 pass
+# IMPORTANT: replace sk-REPLACE_WITH_REAL_PROJECT_KEY above with the real Slingring key (it starts with sk-).
+# The gateway rejects anything not starting with sk-. Health works without it, but questions will 401.
+curl -s -m 10 http://slingring.procol.tech/v1/models -H "Authorization: Bearer $(grep LLM_API_KEY .env | cut -d= -f2)"   # must LIST MODELS, not an auth error
+npm test    # on a service-only box the 4 route-expansion tests SKIP (they need a backend clone); the rest pass
 npm run serve &  sleep 2;  curl -s http://127.0.0.1:8787/api/health;  kill %1
 ```
 No repo clones are required for the service — source code is inside the database.

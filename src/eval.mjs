@@ -67,7 +67,8 @@ for (const t of questions) {
     if (cited.length) proseChecks.push(["cites-a-real-file", cited.some(f => prose.includes(f))]);
     // 2. HONESTY -- the one that actually separates models. If the trace stopped, say so.
     if (ev.unresolved.length) {
-      const words = /unresolv|runtime|cannot|can't|could not|not determin|stops|unknown/i.test(prose);
+      // the graph's own label for a dead end is AMBIGUOUS; saying it counts as admitting the gap
+      const words = /unresolv|ambiguous|runtime|cannot|can't|could not|not determin|not (statically )?resolved|stops|unknown/i.test(prose);
       proseChecks.push(["admits-the-gap", words]);
     }
     // 3. no invented file paths: every *.rb / *.js token in the prose must be one we supplied
