@@ -1,28 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { askStream, getHealth, getRefs } from "./api.js";
 
+const read = (k, d) => { try { return localStorage.getItem(k) || d; } catch { return d; } };
+const write = (k, v) => { try { localStorage.setItem(k, v); } catch { /* storage blocked */ } };
+
 const newTurn = (question, refs) => ({
   id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-  question, refs, status: "", steps: [], text: "", claims: [], evidence: {},
+  question, refs, startedAt: Date.now(), status: "", steps: [], text: "", claims: [], evidence: {},
   unresolved: [], truncated: null, error: null, summary: null, intent: null,
 });
 
 export function useAgent() {
   const [health, setHealth] = useState(null);
   const [refs, setRefs] = useState([]);
-  const [selectedRef, setSelectedRef] = useState("main");
-  const [style, setStyle] = useState("auto");
+  const [selectedRef, setSelectedRefState] = useState(() => read("ckg_ref", "main"));
+  const [style, setStyleState] = useState(() => read("ckg_style", "auto"));
   const [turns, setTurns] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [asking, setAsking] = useState(false);
   const abortRef = useRef(null);
 
+  const setSelectedRef = useCallback((v) => { setSelectedRefState(v); write("ckg_ref", v); }, []);
+  const setStyle = useCallback((v) => { setStyleState(v); write("ckg_style", v); }, []);
+
   useEffect(() => {
     let alive = true;
     getHealth().then((h) => alive && setHealth(h)).catch(() => alive && setHealth({ ok: false }));
-    getRefs().then((r) => alive && setRefs(r.refs || [])).catch(() => {});
+    getRefs().then((r) => {
+      if (!alive) return;
+      const list = r.refs || [];
+      setRefs(list);
+      // a remembered branch that no longer exists falls back to main
+      if (list.length && !list.some((x) => x.ref === selectedRef)) setSelectedRef("main");
+    }).catch(() => {});
     return () => { alive = false; abortRef.current?.(); };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const patchLast = useCallback((fn) => {
     setTurns((prev) => {
@@ -37,7 +49,7 @@ export function useAgent() {
     patchLast((t) => {
       switch (ev.type) {
         case "intent": return { ...t, intent: ev.intent };
-        case "status": return { ...t, status: ev.text, steps: [...t.steps, ev.text].slice(-6) };
+        case "status": return { ...t, status: ev.text, steps: [...t.steps, ev.text] };
         case "token": return { ...t, text: t.text + ev.text };
         case "claim": return { ...t, claims: [...t.claims, ev] };
         case "evidence": return { ...t, evidence: { ...t.evidence, [ev.id]: ev } };
@@ -71,7 +83,7 @@ export function useAgent() {
   const stop = useCallback(() => {
     abortRef.current?.();
     setAsking(false);
-    patchLast((t) => ({ ...t, status: "" }));
+    patchLast((t) => ({ ...t, status: "", steps: [...t.steps, "stopped"] }));
   }, [patchLast]);
 
   const reset = useCallback(() => {
