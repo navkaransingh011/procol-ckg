@@ -14,6 +14,8 @@
   --accent-glow: rgba(91, 91, 214, 0.28);
   --amber: #b45309;
   --amber-soft: #fdf3e3;
+  --teal: #0f766e;
+  --teal-soft: #e6f4f2;
   --danger: #b3261e;
   --danger-soft: #fdecea;
   --ok: #1f7a4d;
@@ -39,6 +41,8 @@
     --accent-glow: rgba(139, 139, 240, 0.32);
     --amber: #f0b062;
     --amber-soft: #2a2114;
+    --teal: #5eead4;
+    --teal-soft: #0f2926;
     --danger: #ff8a80;
     --danger-soft: #331b19;
     --ok: #5fd39a;
@@ -194,6 +198,7 @@ kbd { font: 11px/1 var(--mono); padding: 3px 6px; border: 1px solid var(--line-2
 .sw--frontend { background: var(--accent); }
 .sw--backend { background: var(--amber); }
 .sw--contract { border: 1.5px dashed var(--ink-3); }
+.sw--doc { background: var(--teal); }
 
 .canvas { position: relative; width: 100%; border: 1px solid var(--line); border-radius: var(--radius); background: var(--glass); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); overflow: hidden; touch-action: none; user-select: none; cursor: grab; box-shadow: var(--shadow); }
 .canvas:active { cursor: grabbing; }
@@ -222,6 +227,8 @@ kbd { font: 11px/1 var(--mono); padding: 3px 6px; border: 1px solid var(--line-2
 .fnode--frontend .fnode-bar { fill: var(--accent); }
 .fnode--backend .fnode-bar { fill: var(--amber); }
 .fnode--contract .fnode-bar { fill: none; }
+.fnode--doc .fnode-bar { fill: var(--teal); }
+.fnode--doc.fnode--on .fnode-box { stroke: var(--teal); }
 .fnode--contract .fnode-box { stroke-dasharray: 4 3; fill: var(--bg); }
 .fnode--frontend.fnode--on .fnode-box { stroke: var(--accent); }
 .fnode--backend.fnode--on .fnode-box { stroke: var(--amber); }
@@ -242,6 +249,7 @@ kbd { font: 11px/1 var(--mono); padding: 3px 6px; border: 1px solid var(--line-2
 .node--frontend { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); }
 .node--backend { border-color: color-mix(in srgb, var(--amber) 45%, transparent); background: var(--amber-soft); }
 .node--contract { border-style: dashed; background: transparent; }
+.node--doc { border-color: color-mix(in srgb, var(--teal) 45%, transparent); background: var(--teal-soft); }
 .node--doc { border-color: color-mix(in srgb, var(--doc) 45%, transparent); background: var(--doc-soft); }
 .node--on { border-color: var(--ink); }
 
@@ -250,6 +258,7 @@ kbd { font: 11px/1 var(--mono); padding: 3px 6px; border: 1px solid var(--line-2
 .evidence::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--ink-3); }
 .evidence--frontend::before { background: var(--accent); }
 .evidence--backend::before { background: var(--amber); }
+.evidence--doc::before { background: var(--teal); }
 .evidence--contract::before { background: repeating-linear-gradient(var(--ink-3) 0 4px, transparent 4px 8px); }
 @keyframes slide { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: none; } }
 .evidence-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }

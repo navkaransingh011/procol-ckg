@@ -15,6 +15,7 @@ export const edgeLabel = (e) => String(e || "").toLowerCase().replace(/_/g, " ")
 /** Which side of the wire a hop lives on. The endpoint IS the wire, so it gets its own look. */
 export const sideOf = (claim, ev) => {
   if (claim.kind === "HTTP_ENDPOINT") return "contract";
+  if (claim.kind === "DOCUMENT") return "doc"; // business document passage: intent, not proof
   if (ev?.repo === "procol-backend") return "backend";
   return "frontend";
 };
@@ -33,7 +34,7 @@ export const shortName = (claim, ev) => {
 
 export const whereOf = (claim, ev) => {
   const path = ev?.path || claim.path;
-  if (!path) return "HTTP endpoint contract, no source file";
+  if (!path) return claim.kind === "DOCUMENT" ? "uploaded document" : "HTTP endpoint contract, no source file";
   const line = ev?.line || claim.line;
   return line ? `${path}:${line}` : path;
 };

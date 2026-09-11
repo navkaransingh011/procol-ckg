@@ -108,7 +108,7 @@ export default function GraphView({ graph, selected, onSelect, height = 380 }) {
     const draw = () => {
       const s = sim.current; if (!s) return;
       ctx.clearRect(0, 0, w, h);
-      const colours = { frontend: css("--accent"), backend: css("--amber"), contract: css("--ink-3") };
+      const colours = { frontend: css("--accent"), backend: css("--amber"), contract: css("--ink-3"), doc: css("--teal") };
       const ink = css("--ink"), ink3 = css("--ink-3"), line = css("--line-2");
       const focus = hover || selected;
       const near = new Set();

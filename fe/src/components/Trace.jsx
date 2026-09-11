@@ -44,6 +44,7 @@ export default function Trace({ claims, evidence, defaultMode = "flow" }) {
           <span><i className="sw sw--frontend" />frontend</span>
           <span><i className="sw sw--backend" />backend</span>
           <span><i className="sw sw--contract" />HTTP contract</span>
+          {graph.nodes.some((n) => n.side === "doc") && <span><i className="sw sw--doc" />business document</span>}
           {graph.rails.length > 0 && <span className="muted">merge rail = source hop not named by the service</span>}
         </div>
       )}

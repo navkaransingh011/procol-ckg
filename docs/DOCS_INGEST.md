@@ -76,9 +76,14 @@ cites `uploads/<slug>.md § <heading>`.
 
 ## Sharing the result
 
-The database, not the repo, holds the documents. After adding a batch on the VM nothing else is needed. After
-adding on a laptop, either re-run the same commands on the VM, or refresh `db/dump/ckg.sql.gz`
-(`pg_dump -Fp --no-owner ... | gzip`) so the VM can reload it.
+The database, not the repo, holds the documents. The curated set lives in `db/business-docs/` (one Markdown
+file per document plus `manifest.tsv`), and **the VM deploy ingests it on every release**
+(`deploy/vm-deploy.sh` runs `db/business-docs/ingest.sh --replace --if-changed`; unchanged documents are
+skipped). So the path to production is: add or edit the Markdown there, add a manifest row, merge to `main`.
+Ad-hoc `ingest-doc.mjs` runs on the VM still work but are not tracked; prefer the folder.
+`db/dump/ckg.sql.gz` is a bootstrap artifact for new environments; refresh it after a batch on a laptop
+(`pg_dump -Fp --no-owner ckg | grep -v -E "^(CREATE EXTENSION|COMMENT ON EXTENSION|ALTER DEFAULT PRIVILEGES FOR ROLE) " | gzip -9`),
+but the deploy never reloads it.
 
 ## Not yet built
 

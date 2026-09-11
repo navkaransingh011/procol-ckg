@@ -19,6 +19,14 @@ git reset --hard "$TARGET_REF"
 AFTER="$(git rev-parse HEAD)"
 echo "==> $BEFORE -> $AFTER"
 
+# Bash keeps reading the file it opened, so when this deploy changes vm-deploy.sh itself the OLD
+# version would finish the run and the new steps would only take effect on the NEXT deploy.
+# Re-exec once so the freshly checked-out script is the one that runs the rest of this deploy.
+if [ "$BEFORE" != "$AFTER" ] && [ -z "${CKG_DEPLOY_REEXEC:-}" ] && ! git diff --quiet "$BEFORE" "$AFTER" -- deploy/vm-deploy.sh; then
+  echo "==> deploy script changed in this release; re-running the new version"
+  exec env CKG_DEPLOY_REEXEC=1 bash "$REPO_DIR/deploy/vm-deploy.sh" "$TARGET_REF"
+fi
+
 echo "==> installing dependencies"
 npm ci --omit=dev
 npm --prefix fe ci
@@ -31,6 +39,14 @@ npm run fe:build
 echo "==> applying migrations"
 set -a; . ./.env; set +a
 npm run migrate
+
+# Business documents live in the database, not the repo, so the deploy keeps them in sync with
+# db/business-docs/. Unchanged documents are skipped; a failure here must never block a release
+# (answers simply fall back to code-only until the next deploy).
+echo "==> syncing business documents"
+if ! db/business-docs/ingest.sh --replace --if-changed; then
+  echo "!! business document sync failed; continuing the deploy" >&2
+fi
 
 echo "==> restarting $SERVICE"
 sudo systemctl restart "$SERVICE"

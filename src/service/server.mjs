@@ -9,6 +9,7 @@ import { ask } from "./agent.mjs";
 import { provider } from "./llm.mjs";
 import { q, pool } from "../db.mjs";
 import { resolveScope } from "../tools.mjs";
+import { embed } from "./embed.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.CKG_HOST || "127.0.0.1";
@@ -168,6 +169,8 @@ server.listen(PORT, HOST, () => {
   console.log(`  provider  ${p.mock ? "mock (no model, no key)" : p.base + " · " + p.model}`);
   console.log(`  auth      ${AUTH_MODE}${AUTH_MODE === "dev" ? "  ← NOT AUTHENTICATED" : ""}`);
   console.log(`  cors      ${ORIGIN}`);
+  // Warm the embedding model now, so the first question's document search is ~12 ms instead of ~170 ms.
+  embed(["warm up"]).then(() => console.log("  embed     warm")).catch((e) => console.log(`  embed     not available (${e.message}); document search will be skipped`));
 });
 
 for (const sig of ["SIGINT", "SIGTERM"]) {
