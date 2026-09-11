@@ -100,3 +100,18 @@ whichever cloud your infra team already operates before wiring `.github/workflow
   `pathTemplate=null`. Deliberate: they need scope-aware variable tracing.
 - Backend extractors not yet written. `procol-backend` indexes zero entities today.
 - Multi-line `promisifiedXHR(` calls are missed by the regex (~75 of 785).
+
+## Semantic anchoring (pilot)
+
+`ckg.embeddings` holds one vector per entity "card" (name, humanized words, path, routes/columns/members, feature summary).
+Vectors are used only to pick a starting node when the question has no identifier in it; facts never come from vectors.
+
+```bash
+npm run embed                 # embed all cards on main (content-addressed: unchanged cards are skipped)
+npm run eval:anchor           # name-based vs semantic anchoring on eval/questions_anchor.json
+node --env-file=.env src/eval-planner-anchor.mjs   # planner vs semantic vs union on the plain questions
+```
+
+Provider is `EMBED_PROVIDER=local` (`@huggingface/transformers`, model cached in `~/.cache/procol-ckg-models`) or
+`openai` (any `/v1/embeddings`). Pilot result: name anchor 8/8 on named questions, 0/8 on plain ones; semantic 5/8
+plain in top-10; planner + semantic union 7/8. See `eval/out/anchor_pilot_*.md`.

@@ -1,17 +1,64 @@
 {
   "_comment": "The ONLY refs that get indexed. ~12 long-lived tenant refs, not 2,120 branches. Adding a tenant is a change here, not a code change.",
   "procol-client-dashboard": [
-    { "ref": "main",             "tenant": "procol",       "env": "prod" },
-    { "ref": "reliance-main",    "tenant": "ril",          "env": "prod" },
-    { "ref": "ril-ppd-final",    "tenant": "ril",          "env": "ppd" },
-    { "ref": "ril-qa-final",     "tenant": "ril",          "env": "qa" },
-    { "ref": "ril-dev-final",    "tenant": "ril",          "env": "dev" },
-    { "ref": "jindal-sandbox",   "tenant": "jindal",       "env": "sandbox" },
-    { "ref": "rfx-qa-main",      "tenant": "procol",       "env": "qa" },
-    { "ref": "saint-gobain-demo","tenant": "saint-gobain", "env": "demo" },
-    { "ref": "demo-main",        "tenant": "procol",       "env": "demo" }
+    {
+      "ref": "main",
+      "tenant": "procol",
+      "env": "prod"
+    },
+    {
+      "ref": "reliance-main",
+      "tenant": "ril",
+      "env": "prod"
+    },
+    {
+      "ref": "ril-ppd-final",
+      "tenant": "ril",
+      "env": "ppd"
+    },
+    {
+      "ref": "ril-qa-final",
+      "tenant": "ril",
+      "env": "qa"
+    },
+    {
+      "ref": "ril-dev-final",
+      "tenant": "ril",
+      "env": "dev"
+    },
+    {
+      "ref": "jindal-sandbox",
+      "tenant": "jindal",
+      "env": "sandbox"
+    },
+    {
+      "ref": "rfx-qa-main",
+      "tenant": "procol",
+      "env": "qa"
+    },
+    {
+      "ref": "saint-gobain-demo",
+      "tenant": "saint-gobain",
+      "env": "demo"
+    },
+    {
+      "ref": "demo-main",
+      "tenant": "procol",
+      "env": "demo"
+    }
   ],
   "procol-backend": [
-    { "ref": "main", "tenant": "shared", "env": "prod" }
+    {
+      "ref": "main",
+      "tenant": "shared",
+      "env": "prod"
+    }
+  ],
+  "web-bidding": [
+    {
+      "ref": "main",
+      "tenant": "procol",
+      "env": "prod"
+    }
   ]
 }

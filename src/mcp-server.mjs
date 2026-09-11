@@ -8,7 +8,8 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { findEntity, traceFrom, getEvidence, endpointCoverage, NARRATIVE_EDGES } from "./tools.mjs";
+import { runSql, SCHEMA_DOC } from "./sqltool.mjs";
+import { findEntity, traceFrom, getEvidence, endpointCoverage, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, NARRATIVE_EDGES } from "./tools.mjs";
 
 const TOOLS = [
   {
@@ -30,6 +31,7 @@ const TOOLS = [
           description: "narrow to one kind",
         },
         repo: { type: "string", enum: ["procol-client-dashboard", "procol-backend"] },
+        refs: { type: "array", items: { type: "string" }, description: "scope to these deployed refs, e.g. ['main']" },
         limit: { type: "integer", default: 20 },
       },
       required: ["query"],
@@ -80,6 +82,91 @@ const TOOLS = [
     },
   },
   {
+    name: "list_entities",
+    description:
+      "Enumerate EVERY node matching a shape. Use this for 'all', 'every', 'how many', 'which ones' — " +
+      "find_entity returns one anchor and cannot express a set. Returns total plus a complete flag.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["FEATURE","PERSON","SYMBOL","UI_COMPONENT","UI_ROUTE","STATE_ACTION",
+          "HTTP_CALL_SITE","HTTP_ENDPOINT","SERVER_ROUTE","HANDLER","SERVICE","DB_TABLE","JOB",
+          "EXTERNAL_SERVICE","CONFIG_KEY","TEST_CASE","CI_JOB","OBSERVED_DEFECT","FILE"] },
+        subkind: { type: "string", description: "attrs.subkind, e.g. 'github_action' to separate CI actions from runtime integrations" },
+        path_prefix: { type: "string", description: "e.g. app/services/awarding, or lib/external_api" },
+        name_prefix: { type: "string" },
+        name_contains: { type: "string" },
+        order_by: { type: "string", enum: ["name","activity","path"], description: "'activity' = most-changed first" },
+        refs: { type: "array", items: { type: "string" }, default: ["main"] },
+        limit: { type: "integer", default: 200 },
+      },
+    },
+  },
+  {
+    name: "owners_of",
+    description:
+      "Who has touched this code, from git history — commits, last commit date, nodes touched. " +
+      "Derived from commit history, not a formal ownership registry; say so when citing it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path_prefix: { type: "string" },
+        entity_ids: { type: "array", items: { type: "integer" } },
+        refs: { type: "array", items: { type: "string" }, default: ["main"] },
+        limit: { type: "integer", default: 10 },
+      },
+    },
+  },
+  {
+    name: "get_summaries",
+    description:
+      "Cached prose overviews at system / feature / module / symbol altitude. Start here for " +
+      "'what does X do' or 'give me the big picture' before tracing anything.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        altitude: { type: "string", enum: ["system","feature","module","symbol"] },
+        subject_key: { type: "string" },
+        audience: { type: "string", enum: ["all","business","technical"], default: "all" },
+        refs: { type: "array", items: { type: "string" }, default: ["main"] },
+      },
+    },
+  },
+  {
+    name: "endpoint_family",
+    description: "Every endpoint under a URL prefix with ALL frontend callers (path:line) and the route/handler serving each. " +
+                 "Use for 'who calls /x/*' and 'what serves /x/*'. A relationship list, which list_entities cannot express.",
+    inputSchema: { type: "object", properties: {
+      path_prefix: { type: "string", description: "e.g. /approval_workflow/approval_requests" },
+      method: { type: "string", enum: ["GET","POST","PUT","PATCH","DELETE"] },
+      refs: { type: "array", items: { type: "string" }, default: ["main"] } }, required: ["path_prefix"] },
+  },
+  {
+    name: "read_source",
+    description: "Read numbered source lines for a path the graph knows, at the INDEXED commit (never the working tree). " +
+                 "Bounded to 120 lines; secret paths refused. Use after find_entity to see what a method actually does.",
+    inputSchema: { type: "object", properties: {
+      repo: { type: "string", enum: ["procol-backend","procol-client-dashboard","web-bidding"] },
+      path: { type: "string" }, start_line: { type: "integer" }, end_line: { type: "integer" },
+      context: { type: "integer", default: 0 },
+      refs: { type: "array", items: { type: "string" }, default: ["main"] } }, required: ["repo","path"] },
+  },
+  {
+    name: "grep_source",
+    description: "Commit-pinned, fixed-string grep across a repo (app/ lib/ src/ config/), max 40 hits with context. " +
+                 "Use for 'every place that references X'. Pick distinctive tokens (self.mcp?, not session).",
+    inputSchema: { type: "object", properties: {
+      repo: { type: "string", enum: ["procol-backend","procol-client-dashboard","web-bidding"] },
+      pattern: { type: "string" }, max_hits: { type: "integer", default: 40 }, context: { type: "integer", default: 2 },
+      refs: { type: "array", items: { type: "string" }, default: ["main"] } }, required: ["repo","pattern"] },
+  },
+  {
+    name: "run_sql",
+    description: "Run one read-only SELECT against the graph views (v_nodes, v_edges, v_refs) as a SELECT-only role with a 5s " +
+                 "timeout and 200-row cap. Evidence (repo/path/line) is auto-attached for any entity id column. Schema: " + SCHEMA_DOC.slice(0, 1800),
+    inputSchema: { type: "object", properties: { sql: { type: "string" }, note: { type: "string" } }, required: ["sql"] },
+  },
+  {
     name: "endpoint_coverage",
     description:
       "Counts of endpoints joined frontend↔backend, called-but-not-served (dead frontend calls " +
@@ -92,6 +179,13 @@ const TOOLS = [
 ];
 
 const HANDLERS = {
+  run_sql: runSql,
+  endpoint_family: endpointFamily,
+  read_source: readSource,
+  grep_source: grepSource,
+  list_entities: listEntities,
+  owners_of: ownersOf,
+  get_summaries: getSummaries,
   find_entity: findEntity,
   trace_from: traceFrom,
   get_evidence: getEvidence,

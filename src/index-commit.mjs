@@ -18,6 +18,7 @@ import * as beExternal from "./extractors/be-external.mjs";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { normalizeEndpoint } from "./normalize.mjs";
 
 const EXTRACTORS = [feHttp, beRoutes, beSchema, beExternal];
 const SECRET_PATHS = /(^|\/)(\.env|\.env\..*|.*\.pem|id_rsa.*|.*\.key|.*\.p12)$/;
@@ -28,24 +29,13 @@ const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i === -1 ? d : 
 
 const siteHash = (key) => hex(createHash("sha1").update(String(key)).digest("hex"));
 
-/** Query-string keys are evidence, never part of path identity. */
-function normalizeEndpoint(raw) {
-  if (!raw) return null;
-  let p = raw.split("?")[0].trim();
-  p = p.replace(/\(\.:format\)$/, "");            // Rails
-  p = p.replace(/^https?:\/\/[^/]+/, "");         // absolute -> path
-  p = p.replace(/\/+$/, "") || "/";
-  p = p.replace(/:[A-Za-z_][\w]*/g, "*");         // :id  -> *
-  if (!p.startsWith("/")) p = "/" + p;
-  return p.replace(/\/{2,}/g, "/");
-}
-
 async function main() {
   const repoDir = arg("repo-dir");
   const ref = arg("ref", "HEAD");
   const trigger = arg("trigger", "manual");
   const tenant = arg("tenant", null);
   const env = arg("env", null);
+  const asRef = arg("as", null);   // record a raw SHA under the ref name it was, e.g. --ref 1089000b3a --as main
   if (!repoDir) throw new Error("--repo-dir is required");
 
   const t0 = Date.now();
@@ -54,7 +44,7 @@ async function main() {
 
   const repoId = await upsertRepo("procol", repoName, repoName.includes("backend") ? "monolith" : "spa");
   await upsertCommit(repoId, commit.sha, commit.committedAt, commit.subject, null);
-  await touchRef(repoId, ref.replace(/^origin\//, ""), commit.sha, tenant, env);
+  await touchRef(repoId, (asRef || ref).replace(/^origin\//, ""), commit.sha, tenant, env);
 
   const run = await one(
     `insert into ckg.index_runs (repo_id, commit_sha, ref_name, trigger) values ($1,$2,$3,$4) returning id`,

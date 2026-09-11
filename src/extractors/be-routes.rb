@@ -243,6 +243,20 @@ class Recorder
 end
 
 module Rails
+  # routes.rb sometimes gates blocks on Rails.env.production? etc. We model the
+  # DEPLOYED route set: production? is true, every other env predicate is false.
+  class EnvInquirer < String
+    def method_missing(name, *_a)
+      return name.to_s == 'production?' if name.to_s.end_with?('?')
+      super
+    end
+    def respond_to_missing?(name, _p = false)
+      name.to_s.end_with?('?') || super
+    end
+  end
+  def self.env
+    EnvInquirer.new('production')
+  end
   module RouteSet
     def self.draw(&blk)
       Recorder::CURRENT.instance_eval(&blk)

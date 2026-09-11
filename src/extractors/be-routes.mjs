@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const NAME = "be-routes";
-export const VERSION = "1.0-stubdsl";
+export const VERSION = "1.1-stubdsl";  // 1.1: Rails.env modelled -> env-gated routes now expand
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 

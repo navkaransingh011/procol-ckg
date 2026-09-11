@@ -6,20 +6,24 @@
 //   LLM_BASE_URL=https://api.openai.com/v1   LLM_MODEL=gpt-4.1-mini          LLM_API_KEY=sk-...
 //   LLM_BASE_URL=mock                        (no model, no key -- for FE development)
 
-const BASE  = process.env.LLM_BASE_URL || "mock";
-const MODEL = process.env.LLM_MODEL || "mock";
-const KEY   = process.env.LLM_API_KEY || "";
-const AZURE_VERSION = process.env.LLM_AZURE_API_VERSION || "";
+// Read at call time (not module load) so an eval can switch models in one process.
+const cfg = () => {
+  const BASE = process.env.LLM_BASE_URL || "mock";
+  return { BASE, MODEL: process.env.LLM_MODEL || (BASE === "mock" ? "mock" : "unspecified"),
+           KEY: process.env.LLM_API_KEY || "", AZURE_VERSION: process.env.LLM_AZURE_API_VERSION || "" };
+};
 
-export const provider = () => ({ base: BASE, model: MODEL, mock: BASE === "mock" });
+export const provider = () => { const c = cfg(); return { base: c.BASE, model: c.MODEL, mock: c.BASE === "mock" }; };
 
 function endpoint() {
+  const { BASE, AZURE_VERSION } = cfg();
   // Azure puts the deployment in the path and the api-version in the query.
   if (AZURE_VERSION) return `${BASE}/chat/completions?api-version=${AZURE_VERSION}`;
   return `${BASE}/chat/completions`;
 }
 
 function headers() {
+  const { KEY, AZURE_VERSION } = cfg();
   const h = { "content-type": "application/json" };
   if (!KEY) return h;
   if (AZURE_VERSION) h["api-key"] = KEY;      // Azure OpenAI
@@ -29,6 +33,7 @@ function headers() {
 
 /** One non-streaming round. Tool rounds don't need streaming; the final answer does. */
 export async function chat({ messages, tools, temperature = 0.1, max_tokens = 2000 }) {
+  const { BASE, MODEL } = cfg();
   if (BASE === "mock") throw new Error("mock provider: use mockRound() instead");
   const res = await fetch(endpoint(), {
     method: "POST",
@@ -48,6 +53,7 @@ export async function chat({ messages, tools, temperature = 0.1, max_tokens = 20
 
 /** Final answer, streamed token by token. */
 export async function* chatStream({ messages, temperature = 0.1, max_tokens = 2000 }) {
+  const { BASE, MODEL } = cfg();
   if (BASE === "mock") return;
   const res = await fetch(endpoint(), {
     method: "POST",

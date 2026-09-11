@@ -44,7 +44,7 @@ Response: `text/event-stream`, one JSON object per `data:` line. Use
 |---|---|---|
 | `status` | `{ text }` | transient line ("tracing from api.js:5") |
 | `token` | `{ text }` | append to the current answer |
-| `claim` | `{ id, text, evidence_ids[], confidence }` | a sentence with citation chips |
+| `claim` | `{ id, text, evidence_ids[], confidence, kind, name, path, line, edge, depth }` | one hop of the trace; `edge` is the edge kind that led here (`TARGETS`, `SERVES`, `HANDLED_BY`…), null for the anchor |
 | `evidence` | `{ id, repo, path, line, commit, ref, extractor }` | popover content for a chip |
 | `unresolved` | `{ fqn, path, line, reason }` | **a normal outcome, not an error** |
 | `truncated` | `{ reason, at_depth }` | "trace bounded at depth 6" |

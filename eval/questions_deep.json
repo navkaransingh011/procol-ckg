@@ -1,0 +1,42 @@
+[
+ {
+  "id": "E1",
+  "level": "easy",
+  "q": "Which Rails controller action serves GET /activity_logs, in which file and line is it, and which methods does it call that were observed at runtime?"
+ },
+ {
+  "id": "E2",
+  "level": "easy",
+  "q": "List every column of the custom_configurations table with its type."
+ },
+ {
+  "id": "E3",
+  "level": "easy",
+  "q": "Which external or third-party services does the backend integrate with under lib/external_api? Name all of them."
+ },
+ {
+  "id": "M1",
+  "level": "medium",
+  "q": "What does CustomConfiguration.cached_all_configs do, what known bug exists in it, what is the root cause, and what is the fix?"
+ },
+ {
+  "id": "M2",
+  "level": "medium",
+  "q": "Which frontend files in procol-client-dashboard call the /approval_workflow/approval_requests endpoints, and which Rails controller actions serve each of them?"
+ },
+ {
+  "id": "M3",
+  "level": "medium",
+  "q": "How is the Clara access token issued and stored on the backend? Which Session token_type does it use, and which frontend code stores the token after login?"
+ },
+ {
+  "id": "C1",
+  "level": "hard",
+  "q": "Trace GET /v1/trade/:id/quote_details/:quote_id end to end: which frontend files call it, which Rails action serves it, which methods it calls that were observed at runtime, which tables or models it touches, whether any known defect lies on the path, and exactly where the trace becomes uncertain."
+ },
+ {
+  "id": "C2",
+  "level": "hard",
+  "q": "The Session model has enum token_type { sourcing, mcp }. If a third token_type such as code_graph were added and a session minted with it, what would happen to that user's other sessions and why? Identify every guard in the codebase that branches on mcp? and explain what each one protects."
+ }
+]

@@ -1,0 +1,78 @@
+[
+  {
+    "id": "q1",
+    "q": "What happens when activity logs are fetched?",
+    "expect": {
+      "fqn_any": [
+        "be:api/activity_logs#index",
+        "be:sym:Api::ActivityLogsController#index"
+      ],
+      "min_hops": 3
+    }
+  },
+  {
+    "id": "q2",
+    "q": "What serves /approval_workflow/approval_requests?",
+    "expect": {
+      "fqn_any": [
+        "be:api/approval_workflow/approval_requests#index"
+      ],
+      "min_hops": 2
+    }
+  },
+  {
+    "id": "q3",
+    "q": "Api::TradeController",
+    "expect": {
+      "kind_any": [
+        "SYMBOL"
+      ],
+      "runtime_calls_min": 20
+    }
+  },
+  {
+    "id": "q4",
+    "q": "CustomConfiguration.cached_all_configs",
+    "expect": {
+      "fqn_any": [
+        "be:sym:CustomConfiguration.cached_all_configs"
+      ],
+      "defect_expected": true
+    }
+  },
+  {
+    "id": "q5",
+    "q": "What does the bids table contain?",
+    "expect": {
+      "fqn_any": [
+        "be:table:bids"
+      ],
+      "columns_min": 10
+    }
+  },
+  {
+    "id": "q6",
+    "q": "What does src/redux/orders/api.js call?",
+    "expect": {
+      "unresolved_expected": true,
+      "min_hops": 1
+    }
+  },
+  {
+    "id": "q7",
+    "q": "Which code paths lead into TradeTemplateHelper?",
+    "expect": {
+      "fqn_any": [
+        "be:sym:TradeTemplateHelper"
+      ],
+      "reverse_callers_min": 5
+    }
+  },
+  {
+    "id": "q8",
+    "q": "S3Upload upload_excel_to_s3",
+    "expect": {
+      "defect_expected": true
+    }
+  }
+]

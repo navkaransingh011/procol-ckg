@@ -8,12 +8,16 @@
 //   3. the model selects only the columns it thinks it needs, detaching provenance
 //      so nobody can check the answer.
 import { q, hex } from "./db.mjs";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
 
 // Traversing all 17 edge kinds from a component reaches half the codebase through
 // IMPORTS. Narrative traversal uses only the kinds that describe execution.
 export const NARRATIVE_EDGES = [
   "DISPATCHES", "INVOKES", "ISSUES_HTTP", "TARGETS", "SERVES",
   "HANDLED_BY", "USES_SERVICE", "READS", "WRITES", "ENQUEUES",
+  "DECLARES", "CALLS",   // HANDLER -> its Ruby method -> runtime-verified callees
+  "TRIGGERS_DEFECT",     // a known, execution-confirmed bug on this path
 ];
 
 // Execution direction is NOT the same as edge direction.
@@ -59,7 +63,10 @@ export async function resolveScope(refNames = ["main"]) {
 }
 
 /** find_entity -- exact fqn first, then trigram on name, then path. */
-export async function findEntity({ query, kind = null, repo = null, limit = 20 }) {
+export async function findEntity({ query, kind = null, repo = null, limit = 20, refs = null }) {
+  // Scope to the commits those refs point at, so "bids on main" anchors on main's row --
+  // not an older commit's row that happens to share the name. Contract nodes (null commit) always pass.
+  const commits = refs ? (await resolveScope(refs)).commits : null;
   const rows = await q(
     `with exact as (
        select e.*, 'exact_fqn' as match_reason, 1.0::float as score
@@ -72,7 +79,10 @@ export async function findEntity({ query, kind = null, repo = null, limit = 20 }
         where e.name is not null and e.name % $1
           and ($2::text is null or e.kind::text = $2)
      ), bypath as (
-       select e.*, 'path_substring' as match_reason, 0.3::float as score
+       -- a path-shaped query ("src/x/api.js", "foo.rb") means the file itself: score it above
+       -- any fuzzy name hit, otherwise a handler with similar trigrams steals the anchor.
+       select e.*, 'path_substring' as match_reason,
+              (case when $1 ~ '[/.]' then 0.9 else 0.3 end)::float as score
          from ckg.entities e
         where e.path ilike '%' || $1 || '%'
           and ($2::text is null or e.kind::text = $2)
@@ -83,9 +93,10 @@ export async function findEntity({ query, kind = null, repo = null, limit = 20 }
        from (select * from exact union all select * from byname union all select * from bypath) u
       where ($3::text is null or exists (
               select 1 from ckg.repos rp where rp.id = u.repo_id and rp.name = $3))
+        and ($5::text[] is null or u.commit_sha is null or encode(u.commit_sha,'hex') = any($5::text[]))
       order by score desc, kind, fqn
       limit $4`,
-    [query, kind, repo, limit],
+    [query, kind, repo, limit, commits],
   );
   return {
     matches: rows,
@@ -127,7 +138,7 @@ export async function traceFrom({
        -- normalise every usable edge into a directed hop, so the recursion below
        -- is direction-agnostic and the SERVES flip is handled once, here.
        select g.id as edge_id, g.kind::text as kind, g.confidence, g.guard_expr, g.start_line,
-              encode(g.commit_sha,'hex') as commit_sha,
+              encode(g.commit_sha,'hex') as commit_sha, g.resolution::text as resolution,
               case when g.kind::text = any($2::text[]) then g.src_entity_id else g.dst_entity_id end as from_id,
               case when g.kind::text = any($2::text[]) then g.dst_entity_id else g.src_entity_id end as to_id
          from ckg.edges g
@@ -137,12 +148,12 @@ export async function traceFrom({
      ), walk as (
        select * from (
          with recursive w as (
-           select h.edge_id, h.kind, h.confidence, h.guard_expr, h.start_line, h.commit_sha,
+           select h.edge_id, h.kind, h.confidence, h.guard_expr, h.start_line, h.commit_sha, h.resolution,
                   h.from_id as src, h.to_id as dst, 1 as depth,
                   array[h.from_id, h.to_id] as path
              from hops h where h.from_id = $1
            union all
-           select h.edge_id, h.kind, h.confidence, h.guard_expr, h.start_line, h.commit_sha,
+           select h.edge_id, h.kind, h.confidence, h.guard_expr, h.start_line, h.commit_sha, h.resolution,
                   h.from_id, h.to_id, w.depth + 1, w.path || h.to_id
              from w join hops h on h.from_id = w.dst
             where w.depth < $6
@@ -180,7 +191,7 @@ export async function traceFrom({
     }])).values()],
     edges: kept.map((r) => ({
       id: r.edge_id, kind: r.kind, src: r.src, dst: r.dst,
-      confidence: Number(r.confidence), guard: r.guard_expr,
+      confidence: Number(r.confidence), guard: r.guard_expr, resolution: r.resolution,
       line: r.start_line, commit: r.commit_sha,
     })),
     // Three states the caller MUST be able to distinguish, because collapsing
@@ -227,4 +238,225 @@ export async function endpointCoverage({ refs = ["main"] } = {}) {
     [commits],
   );
   return { scope: refs, ...rows[0] };
+}
+
+
+/**
+ * listEntities -- the SET operation the agent was missing. findEntity answers
+ * "which node is this?"; this answers "give me EVERY node matching a shape".
+ * Without it, "name all 39 external services" retrieved one, because point
+ * lookup plus edge-walking cannot express a set.
+ */
+export async function listEntities({ kind = null, subkind = null, path_prefix = null, name_prefix = null,
+                                     name_contains = null, refs = ["main"], repo = null,
+                                     order_by = "name", limit = 200 }) {
+  const commits = refs ? (await resolveScope(refs)).commits : null;
+  const order = { name: "e.name",
+                  activity: "coalesce((e.attrs->'activity'->>'file_touches_12mo')::int, (e.attrs->'activity'->>'commits_12mo')::int) desc nulls last, e.name",
+                  path: "e.path, e.start_line" }[order_by] ?? "e.name";
+  const rows = await q(
+    `select e.id, e.kind::text, e.fqn, e.name, e.path, e.start_line, e.end_line,
+            e.attrs, e.resolution::text, e.confidence, rp.name as repo,
+            encode(e.commit_sha,'hex') as commit_sha
+       from ckg.entities e left join ckg.repos rp on rp.id = e.repo_id
+      where ($1::text is null or e.kind::text = $1)
+        and ($2::text is null or e.path like $2 || '%')
+        and ($3::text is null or e.name ilike $3 || '%')
+        and ($4::text is null or e.name ilike '%' || $4 || '%')
+        and ($5::text is null or rp.name = $5)
+        and ($6::text[] is null or e.commit_sha is null or encode(e.commit_sha,'hex') = any($6::text[]))
+        and ($8::text is null or coalesce(e.attrs->>'subkind','') = $8)
+      order by ${order}
+      limit $7`,
+    [kind, path_prefix, name_prefix, name_contains, repo, commits, Math.min(limit, 500), subkind]);
+  const [{ n }] = await q(
+    `select count(*)::int n from ckg.entities e left join ckg.repos rp on rp.id = e.repo_id
+      where ($1::text is null or e.kind::text = $1)
+        and ($2::text is null or e.path like $2 || '%')
+        and ($3::text is null or e.name ilike $3 || '%')
+        and ($4::text is null or e.name ilike '%' || $4 || '%')
+        and ($5::text is null or rp.name = $5)
+        and ($6::text[] is null or e.commit_sha is null or encode(e.commit_sha,'hex') = any($6::text[]))
+        and ($7::text is null or coalesce(e.attrs->>'subkind','') = $7)`,
+    [kind, path_prefix, name_prefix, name_contains, repo, commits, subkind]);
+  // Breakdown by subkind: EXTERNAL_SERVICE mixes runtime integrations with CI actions, and an
+  // answer that says "all 55 external services" without that distinction is misleading.
+  const bySubkind = rows.reduce((a, r) => { const k = r.attrs?.subkind ?? "(none)"; a[k] = (a[k] || 0) + 1; return a; }, {});
+  return { total: n, returned: rows.length, complete: rows.length >= n, by_subkind: bySubkind, items: rows };
+}
+
+/** Who touches this code, from git history. Answers "who do I ask?". */
+export async function ownersOf({ entity_ids = [], path_prefix = null, refs = ["main"], limit = 10 }) {
+  const commits = (await resolveScope(refs)).commits;
+  return q(
+    `select p.name, p.attrs->>'email' as email, sum((g.attrs->>'commits_touching')::int) as commits,
+            max(g.attrs->>'last_commit') as last_commit, count(distinct g.dst_entity_id) as nodes
+       from ckg.edges g
+       join ckg.entities p on p.id = g.src_entity_id and p.kind = 'PERSON'
+       join ckg.entities t on t.id = g.dst_entity_id
+      where g.kind = 'OWNS'
+        and encode(g.commit_sha,'hex') = any($1::text[])
+        and (($2::bigint[] = '{}' or t.id = any($2::bigint[])) and ($3::text is null or t.path like $3 || '%'))
+      group by 1,2 order by 3 desc limit $4`,
+    [commits, entity_ids, path_prefix, limit]);
+}
+
+/** Cached prose at a given altitude -- the cheap path to a big-picture answer. */
+export async function getSummaries({ altitude = null, subject_key = null, audience = "all", refs = ["main"], limit = 40 }) {
+  const commits = (await resolveScope(refs)).commits;
+  return q(
+    `select s.altitude, s.subject_key, s.audience, s.headline, s.body, s.entity_count,
+            s.generated_by, s.evidence_ids, s.generated_at
+       from ckg.summaries s
+      where encode(s.commit_sha,'hex') = any($1::text[])
+        and ($2::text is null or s.altitude = $2)
+        and ($3::text is null or s.subject_key = $3)
+        and s.audience in ($4, 'all')
+      order by case s.altitude when 'system' then 0 when 'feature' then 1 when 'module' then 2 else 3 end, s.headline
+      limit $5`,
+    [commits, altitude, subject_key, audience, limit]);
+}
+
+
+// ---------------------------------------------------------------------------------
+// endpointFamily -- a RELATIONSHIP list. "Every frontend call site whose target endpoint
+// starts with /approval_workflow/approval_requests, and what serves each." listEntities
+// filters entity fields; this walks TARGETS/SERVES/HANDLED_BY for a whole path family.
+// ---------------------------------------------------------------------------------
+export async function endpointFamily({ path_prefix, method = null, refs = ["main"], limit = 60 }) {
+  if (!path_prefix) return { error: "path_prefix required" };
+  const { commits } = await resolveScope(refs);
+  const norm = path_prefix.replace(/\/+$/, "");
+  const rows = await q(
+    `with ep as (
+       select e.id, e.fqn, e.name, e.attrs->>'method' as method
+         from ckg.entities e
+        where e.kind='HTTP_ENDPOINT' and (e.name = $1 or e.name like $1 || '/%')
+          and ($2::text is null or e.attrs->>'method' = $2)
+     )
+     select ep.fqn as endpoint, ep.method, ep.name as path,
+            coalesce((select json_agg(json_build_object('path', cs.path, 'line', cs.start_line, 'raw', cs.attrs->>'raw', 'repo', rp.name))
+                        from ckg.edges t join ckg.entities cs on cs.id=t.src_entity_id join ckg.repos rp on rp.id=cs.repo_id
+                       where t.dst_entity_id=ep.id and t.kind='TARGETS' and encode(t.commit_sha,'hex') = any($3::text[])), '[]') as callers,
+            coalesce((select json_agg(distinct jsonb_build_object('route', sr.name, 'handler', h.name, 'handler_path', h.path))
+                        from ckg.edges sv join ckg.entities sr on sr.id=sv.src_entity_id
+                        left join ckg.edges hb on hb.src_entity_id=sr.id and hb.kind='HANDLED_BY'
+                        left join ckg.entities h on h.id=hb.dst_entity_id
+                       where sv.dst_entity_id=ep.id and sv.kind='SERVES' and encode(sv.commit_sha,'hex') = any($3::text[])), '[]') as served_by
+       from ep order by ep.name, ep.method limit $4`,
+    [norm, method, commits, limit]);
+  const fam = rows.map(r => ({ ...r, callers: r.callers, served_by: r.served_by,
+                               status: r.callers.length && r.served_by.length ? "joined" : r.callers.length ? "called_not_served" : "served_not_called" }));
+  // Unresolved call sites that mention this path family in their raw source. They are NOT linked
+  // (URL built at runtime), so "served_not_called" may be false for them -- say so.
+  const possibly = await q(
+    `select cs.path, cs.start_line as line, cs.attrs->>'raw' as raw, rp.name as repo
+       from ckg.entities cs join ckg.repos rp on rp.id = cs.repo_id
+      where cs.kind='HTTP_CALL_SITE' and cs.resolution='AMBIGUOUS'
+        and encode(cs.commit_sha,'hex') = any($1::text[])
+        and (cs.attrs->>'raw') ilike '%' || $2 || '%'
+      order by cs.path, cs.start_line limit 30`, [commits, norm.split("/").filter(Boolean).slice(-1)[0] || norm]);
+  const files = new Set(fam.flatMap(f => f.callers.map(c => c.path)));
+  const siblings = await q(
+    `select cs.path, cs.start_line as line, left(cs.attrs->>'raw', 120) as raw, rp.name as repo
+       from ckg.entities cs join ckg.repos rp on rp.id = cs.repo_id
+      where cs.kind='HTTP_CALL_SITE' and cs.resolution='AMBIGUOUS'
+        and encode(cs.commit_sha,'hex') = any($1::text[]) and cs.path = any($2::text[])
+      order by cs.path, cs.start_line limit 30`, [commits, [...files]]);
+  const seenK = new Set(); const unresolved = [];
+  for (const u of [...possibly, ...siblings]) { const k = `${u.path}:${u.line}`; if (!seenK.has(k)) { seenK.add(k); unresolved.push(u); } }
+  return { prefix: norm, refs, endpoints: fam.length, call_sites: fam.reduce((a, f) => a + f.callers.length, 0),
+           joined: fam.filter(f => f.status === "joined").length, family: fam,
+           unresolved_possible_callers: unresolved,
+           note: unresolved.length ? `${unresolved.length} call site(s) build their URL at runtime and could not be linked; "served_not_called" may be wrong for them.` : undefined };
+}
+
+// ---------------------------------------------------------------------------------
+// Source on demand. The graph is structure; git is the code. Read the exact lines at the
+// INDEXED commit, never from a working tree, never a path the graph does not know about,
+// never a secret. Bounded so a model can't ask for the repo.
+// ---------------------------------------------------------------------------------
+const SECRET_PATHS = /(^|\/)(\.env|\.env\..*|.*\.pem|id_rsa.*|.*\.key|.*\.p12|.*\.jks)$/;
+const MAX_LINES = 120;
+const repoDir = (name) => process.env[`CKG_REPO_DIR_${name.toUpperCase().replace(/-/g, "_")}`] || path.resolve(process.cwd(), "..", name);
+
+async function commitFor(repo, refs) {
+  const { refs: rows } = await resolveScope(refs);
+  return rows.find(r => r.repo === repo)?.sha ?? null;
+}
+
+export async function readSource({ repo, path: p, start_line = 1, end_line = null, refs = ["main"], context = 0 }) {
+  if (!repo || !p) return { error: "repo and path required" };
+  if (SECRET_PATHS.test(p)) return { error: "refused: secret path" };
+  const sha = await commitFor(repo, refs);
+  if (!sha) return { error: `no indexed commit for ${repo}@${refs}` };
+  const known = await q(`select 1 from ckg.entities e join ckg.repos rp on rp.id=e.repo_id
+                          where rp.name=$1 and e.path=$2 and encode(e.commit_sha,'hex')=$3 limit 1`, [repo, p, sha]);
+  if (!known.length) return { error: `refused: ${p} is not a path the graph knows at ${sha.slice(0, 8)}` };
+  let text;
+  try { text = execFileSync("git", ["-C", repoDir(repo), "show", `${sha}:${p}`], { encoding: "utf8", maxBuffer: 32e6 }); }
+  catch (e) { return { error: `git show failed: ${String(e.message).split("\n")[0]}` }; }
+  const lines = text.split("\n");
+  const from = Math.max(1, (start_line || 1) - context);
+  const to = Math.min(lines.length, (end_line || Math.min(lines.length, from + 59)) + context, from + MAX_LINES - 1);
+  return { repo, path: p, commit: sha.slice(0, 10), from, to, total_lines: lines.length,
+           truncated: (end_line || lines.length) > to,
+           lines: lines.slice(from - 1, to).map((l, i) => `${String(from + i).padStart(5)}  ${l}`) };
+}
+
+// Bounded, commit-pinned, fixed-string grep. Answers "where else does this appear?" --
+// e.g. every `return if self.mcp?` -- without giving the model the repo.
+export async function grepSource({ repo, pattern, refs = ["main"], paths = ["app", "lib", "src", "config"], max_hits = 40, context = 2 }) {
+  if (!repo || !pattern || pattern.length < 3) return { error: "repo and a pattern of 3+ chars required" };
+  const sha = await commitFor(repo, refs);
+  if (!sha) return { error: `no indexed commit for ${repo}` };
+  let out = "";
+  try {
+    out = execFileSync("git", ["-C", repoDir(repo), "grep", "-n", "-I", "-F", "-e", pattern, sha, "--", ...paths],
+                       { encoding: "utf8", maxBuffer: 32e6 });
+  } catch (e) { if (e.status !== 1) return { error: `git grep failed: ${String(e.message).split("\n")[0]}` }; }
+  const hits = [];
+  for (const line of out.split("\n")) {
+    if (!line) continue;
+    // "<sha>:<path>:<line>:<text>"
+    const m = line.match(/^[0-9a-f]+:([^:]+):(\d+):(.*)$/);
+    if (!m || SECRET_PATHS.test(m[1])) continue;
+    hits.push({ path: m[1], line: Number(m[2]), text: m[3].trim().slice(0, 200) });
+    if (hits.length >= max_hits) break;
+  }
+  // group by file, add a little context around each hit
+  const byFile = new Map();
+  for (const h of hits) { if (!byFile.has(h.path)) byFile.set(h.path, []); byFile.get(h.path).push(h); }
+  const files = [];
+  for (const [p, hs] of byFile) {
+    let src = null;
+    try { src = execFileSync("git", ["-C", repoDir(repo), "show", `${sha}:${p}`], { encoding: "utf8", maxBuffer: 32e6 }).split("\n"); } catch { /* skip context */ }
+    files.push({ path: p, hits: hs.map(h => ({ line: h.line, text: h.text,
+      context: src ? src.slice(Math.max(0, h.line - 1 - context), h.line + context).map((l, i) => `${String(h.line - context + i).padStart(5)}  ${l}`) : undefined })) });
+  }
+  return { repo, pattern, commit: sha.slice(0, 10), total_hits: hits.length, capped: hits.length >= max_hits, files };
+}
+
+/**
+ * semantic_anchor -- meaning-based lookup of a starting node. Embeds the question and returns the
+ * k nearest entity cards. Used ONLY to choose where a trace starts; never as a source of facts.
+ * Scoped to the commits the refs point at, like every other tool. Falls back to {matches: []}
+ * when no embeddings exist for the configured model.
+ */
+export async function semanticAnchor({ question, k = 10, refs = ["main"], kinds = null, repo = null }) {
+  const { embed, embedModelId, toPgVector } = await import("./service/embed.mjs");
+  const model = embedModelId();
+  const [v] = await embed([question], { isQuery: true });
+  const { commits } = await resolveScope(refs);
+  const rows = await q(
+    `select e.id, e.kind::text, e.fqn, e.name, e.path, encode(e.commit_sha,'hex') as commit_sha,
+            m.card, (1 - (m.embedding <=> $1::vector))::float as score
+       from ckg.embeddings m join ckg.entities e on e.id = m.entity_id
+      where m.model = $2
+        and ($3::text[] is null or e.kind::text = any($3::text[]))
+        and (e.commit_sha is null or encode(e.commit_sha,'hex') = any($4::text[]))
+        and ($5::text is null or exists (select 1 from ckg.repos rp where rp.id = e.repo_id and rp.name = $5))
+      order by m.embedding <=> $1::vector
+      limit $6`, [toPgVector(v), model, kinds, commits, repo, k]);
+  return { model, matches: rows, count: rows.length };
 }
