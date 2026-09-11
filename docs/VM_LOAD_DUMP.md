@@ -41,9 +41,10 @@ PGPASSWORD='OWNER_PASSWORD' psql -U ckg -h localhost -d ckg -Atc "select
   (select count(*) from ckg.edges),
   (select count(*) from ckg.summaries),
   (select count(*) from ckg.embeddings),
-  (select count(*) from ckg.blob_text)"
+  (select count(*) from ckg.blob_text),
+  (select count(*) from ckg.doc_chunks)"
 ```
-Expected: `38516|165443|165|26487|8894`
+Expected: `38569|165681|165|26702|8895|1479`
 
 ## 5. Read-only role settings (not carried by a dump) + write test must fail
 ```

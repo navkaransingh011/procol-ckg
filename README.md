@@ -193,6 +193,19 @@ faster-starting fallback, which matters for accuracy because the fallback is the
 repeat question 0 s; an identifier question ~1 s (guided) or ~25 s (plan, long technical answer);
 a plain-English question 5–40 s; a congested spell costs one fallback latency per call, not minutes.
 
+## Documents
+
+Human-written docs are first-class graph nodes (`DOCUMENT`), chunked by heading and embedded for semantic
+search, linked by `MENTIONS` edges to the code they name. Two sources, one pipeline:
+- **in-repo docs** (README, `docs/**`, `ai-review/**`, service READMEs; changelogs skipped) via the `docs`
+  extractor on every index run -- 63 documents, 1,475 passages today;
+- **uploaded business documents** (PRDs, process docs, Notion exports; md/txt/docx/pdf/html) via
+  `node --env-file=.env src/ingest-doc.mjs --file ... --tags ... --owner ...` -- commit-less, visible under
+  every branch, re-linked to each new commit. Guide: [docs/DOCS_INGEST.md](docs/DOCS_INGEST.md).
+
+Answers put the documented rule next to the code and say whether they agree, conflict, or the code side is
+not visible; code wins on conflict and the answer says the doc may be stale.
+
 ## Self-contained database
 
 The indexer stores the text of every source file it sees (`ckg.blob_text`, content-addressed), so READ

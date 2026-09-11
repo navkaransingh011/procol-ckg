@@ -11,7 +11,7 @@ const argv = process.argv.slice(2);
 const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i === -1 ? d : argv[i + 1]; };
 const onlyRepo = arg("repo", null);
 const ref = arg("ref", "main");
-const KINDS = arg("kinds", "FEATURE,HANDLER,DB_TABLE,HTTP_ENDPOINT,EXTERNAL_SERVICE,HTTP_CALL_SITE,SYMBOL").split(",");
+const KINDS = arg("kinds", "FEATURE,DOCUMENT,HANDLER,DB_TABLE,HTTP_ENDPOINT,EXTERNAL_SERVICE,HTTP_CALL_SITE,SYMBOL").split(",");
 const LIMIT = Number(arg("limit", "0"));
 
 // "Api::ActivityLogsController#index" -> "api activity logs controller index"
@@ -32,8 +32,10 @@ async function latestCommits() {
 async function cardsFor(kind, repoId, sha) {
   const scope = kind === "HTTP_ENDPOINT"
     ? `e.kind='HTTP_ENDPOINT' and e.repo_id is null`
+    : kind === "DOCUMENT"
+    ? `e.kind='DOCUMENT' and ((e.repo_id=$1 and e.commit_sha=decode($2,'hex')) or e.commit_sha is null)`
     : `e.kind::text=$1 and e.repo_id=$2 and e.commit_sha=decode($3,'hex')`;
-  const params = kind === "HTTP_ENDPOINT" ? [] : [kind, repoId, sha];
+  const params = kind === "HTTP_ENDPOINT" ? [] : kind === "DOCUMENT" ? [repoId, sha] : [kind, repoId, sha];
   const ents = await q(`select e.id, e.name, e.fqn, e.path, e.attrs from ckg.entities e where ${scope} ${LIMIT ? `limit ${LIMIT}` : ""}`, params);
   if (!ents.length) return [];
   const ids = ents.map(e => Number(e.id));
@@ -81,6 +83,11 @@ async function cardsFor(kind, repoId, sha) {
       const a = e.attrs || {};
       const dir = String(e.path || "").split("/").slice(0, -1).join("/");
       cards.set(e.id, `Frontend screen code in ${e.path} (${humanize(dir)}) calls backend API ${a.method || ""} ${a.pathTemplate || a.raw || ""} (${humanize(a.pathTemplate || "")}).`);
+    }
+  } else if (kind === "DOCUMENT") {
+    for (const e of ents) {
+      const a = e.attrs || {};
+      cards.set(e.id, `Documentation: ${e.name} (${humanize(e.name)}) in ${e.path}. Sections: ${(a.headings || []).slice(0, 12).join("; ")}.${a.tags?.length ? ` Tags: ${a.tags.join(", ")}.` : ""}`);
     }
   } else if (kind === "SYMBOL") {
     // a class card lists its members: "Session ... methods generate_access_token, enforce_single_web_session"
@@ -137,7 +144,19 @@ async function main() {
       console.log(`${r.repo.padEnd(24)} ${kind.padEnd(17)} ${String(cards.length).padStart(6)} cards  ${String(todo.length).padStart(6)} embedded  ${Date.now() - tk}ms`);
     }
   }
-  console.log(`\n${embedded} embedded, ${skipped} unchanged, model ${model}, ${Date.now() - t0}ms`);
+  // ---- documentation passages ----
+  const tc = Date.now();
+  const chunks = await q(`select c.blob_sha, c.ordinal, c.heading_path, c.text, coalesce(d.name, '') title
+                            from ckg.doc_chunks c left join lateral (select name from ckg.entities e where e.blob_sha=c.blob_sha and e.kind='DOCUMENT' limit 1) d on true
+                           where c.embedding is null or c.model <> $1`, [model]);
+  for (let i = 0; i < chunks.length; i += 128) {
+    const b = chunks.slice(i, i + 128);
+    const vecs = await embed(b.map(c => `${c.title} > ${c.heading_path}\n${c.text}`.slice(0, 4000)));
+    for (let j = 0; j < b.length; j++)
+      await q(`update ckg.doc_chunks set embedding=$3::vector, model=$4 where blob_sha=$1 and ordinal=$2`, [b[j].blob_sha, b[j].ordinal, toPgVector(vecs[j]), model]);
+  }
+  if (chunks.length) console.log(`${"documentation".padEnd(24)} ${"DOC_CHUNKS".padEnd(17)} ${String(chunks.length).padStart(6)} passages embedded  ${Date.now() - tc}ms`);
+  console.log(`\n${embedded} embedded, ${skipped} unchanged, ${chunks.length} doc passages, model ${model}, ${Date.now() - t0}ms`);
   await pool.end();
 }
 main().catch(e => { console.error(e); process.exit(1); });

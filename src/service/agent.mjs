@@ -3,7 +3,7 @@
 // The model's job here is small and bounded: pick tools, then write prose over
 // structured results it cannot edit. It never sees source code and never invents
 // a fact. Everything it can cite came from a deterministic extractor.
-import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, semanticAnchor, NARRATIVE_EDGES } from "../tools.mjs";
+import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, semanticAnchor, searchDocs, NARRATIVE_EDGES } from "../tools.mjs";
 import { q } from "../db.mjs";
 import { createHash } from "node:crypto";
 import { runSql, SCHEMA_DOC } from "../sqltool.mjs";
@@ -553,6 +553,16 @@ HOW TO READ THE FACTS
   route -> controller action; DECLARES = class/handler owns method; CALLS = method calls method;
   TRIGGERS_DEFECT = a known bug lies on this path.
 
+DOCUMENTS -- what people WROTE the system should do (business logic), next to what the code DOES
+- "documents" are passages from human-written docs: design docs and READMEs inside the repo at the indexed
+  commit (source "repo"), or uploaded business documents such as PRDs and process docs (source "upload").
+  Cite them as <path> § <heading>. Their resolution is DOCUMENTED: intent, not proof.
+- When the question is about business rules or intended behaviour, lead with the documented rule, then
+  state what the code shows, and say explicitly whether they AGREE, CONFLICT, or whether the code side is
+  simply not visible in the facts. A conflict is a finding -- name both sides. Code facts (source, routes,
+  runtime calls) win over a document when they disagree; say the doc may be stale.
+- Never treat a document as proof that code exists. A doc naming a method is a MENTION, not a definition.
+
 SOURCE, GREPS AND FAMILIES -- when present, these are authoritative
 - "source" entries are the ACTUAL CODE at the indexed commit (numbered lines). You may explain logic,
   conditions and guards from them, and you must cite path:line taken from those line numbers.
@@ -616,6 +626,10 @@ WRITE LIKE THIS
 - Lead with what a USER can do and what happens for them, step by step in plain language.
 - Prefer product words (an approval, a bid, a supplier, a screen) over code words (controller, endpoint, model).
 - Use the "overviews" facts first when present -- they are written for this audience. Then add specifics.
+- "documents" are what the team WROTE about how things should work (design docs, PRDs, process docs). When
+  present, explain the intended behaviour from them in plain words, then say whether the code agrees. If the
+  doc and the code disagree, say so plainly -- that is exactly what a CS or product person needs to know.
+  Name the document by its title (and section) so they can open it.
 - Describe the flow as a short story: the person does X on a screen, the system checks Y, then Z happens,
   and the result is stored so it can be shown later.
 - 4 to 8 sentences, then optionally a short "In the code" line naming 1-3 real files for an engineer who
@@ -762,6 +776,7 @@ function shrink(facts, budget) {
     () => { for (const l of facts.lists || []) l.items = l.items.slice(0, 15); },
     () => { for (const r of facts.lookups) { if (r.downstream) r.downstream = r.downstream.slice(0, 12); if (r.upstream_callers) r.upstream_callers = r.upstream_callers.slice(0, 6); } },
     () => { for (const f of facts.endpoint_families || []) f.family = (f.family || []).slice(0, 12).map(e => ({ ...e, callers: (e.callers || []).slice(0, 6) })); },
+    () => { if (facts.documents) facts.documents = facts.documents.slice(0, 3).map(d => ({ ...d, text: d.text.slice(0, 900) })); },
     () => { if (facts.source) facts.source = facts.source.slice(0, 2); },
     () => { delete facts.greps; },
     () => { for (const l of facts.lists || []) l.items = l.items.slice(0, 6); },
@@ -842,12 +857,24 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
   const prefs = (plan?.endpoint_families || []).filter(x => typeof x === "string" && x.startsWith("/")).slice(0, 3);
   for (const pref of prefs) emit({ type: "status", text: `mapping every endpoint under ${pref}` });
 
-  const [results, listRes, sqlRes, famRes] = await Promise.all([
+  const [results, listRes, sqlRes, famRes, docRes] = await Promise.all([
     Promise.all(lookups.map(l => lookupOne(l, refs, emit, seen))),
     Promise.all(specs.map(spec => listEntities({ kind: spec.kind, path_prefix: spec.path_prefix ?? null, name_contains: spec.name_contains ?? null, subkind: spec.subkind ?? null, refs, limit: LIST_LIMIT }))),
     Promise.all(sqlStmts.map(stmt => runSql({ sql: stmt }).then(r => ({ stmt, r })))),
     Promise.all(prefs.map(pref => endpointFamily({ path_prefix: pref, refs }))),
+    searchDocs({ question, k: 6, refs }).catch(() => ({ passages: [] })),   // what the DOCS say, next to what the code does
   ]);
+  const documents = (docRes.passages || []).map(p => ({ title: p.title, path: p.path, source: p.source || "repo", kind: p.subkind, tags: p.tags,
+                                                        heading: p.heading_path, score: Number(p.score.toFixed(2)), text: p.text.slice(0, 1800) }));
+  if (documents.length) {
+    emit({ type: "status", text: `reading ${documents.length} documentation passage${documents.length > 1 ? "s" : ""}: ${[...new Set(documents.map(d => d.title))].slice(0, 3).join(" · ")}` });
+    for (const p of docRes.passages) if (!seen.has(`doc:${p.doc_id}`)) {
+      seen.add(`doc:${p.doc_id}`);
+      emit({ type: "evidence", id: `d${p.doc_id}`, repo: p.repo || "uploads", path: p.path, line: null, ref: refs.join(","), extractor: "docs" });
+      emit({ type: "claim", id: `doc${p.doc_id}`, text: `DOCUMENT ${p.title} — ${p.heading_path}`, kind: "DOCUMENT", name: p.title, path: p.path, line: null,
+             edge: "MENTIONS", depth: 0, evidence_ids: [], confidence: Number(p.score.toFixed(2)) });
+    }
+  }
   const matched = results.filter(r => r.match !== "none").length;
   emit({ type: "status", text: `${matched}/${results.length} lookups matched a node` });
 
@@ -947,6 +974,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
                   ...(lists.length ? { lists } : {}), ...(sqlResults.length ? { planned_sql: sqlResults } : {}),
                   ...(families.length ? { endpoint_families: families } : {}),
                   ...(source.length ? { source } : {}), ...(greps.length ? { greps } : {}),
+                  ...(documents.length ? { documents } : {}),
                   ...(summaries ? { overviews: summaries } : {}), ...(owners ? { owners } : {}) };
 
   // Phase C: answer (bounded payload, one retry)

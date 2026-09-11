@@ -242,6 +242,7 @@ kbd { font: 11px/1 var(--mono); padding: 3px 6px; border: 1px solid var(--line-2
 .node--frontend { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); }
 .node--backend { border-color: color-mix(in srgb, var(--amber) 45%, transparent); background: var(--amber-soft); }
 .node--contract { border-style: dashed; background: transparent; }
+.node--doc { border-color: color-mix(in srgb, var(--doc) 45%, transparent); background: var(--doc-soft); }
 .node--on { border-color: var(--ink); }
 
 /* ---- evidence panel ---- */

@@ -465,3 +465,37 @@ export async function semanticAnchor({ question, k = 10, refs = ["main"], kinds 
       limit $6`, [toPgVector(v), model, kinds, commits, repo, k]);
   return { model, matches: rows, count: rows.length };
 }
+
+
+/**
+ * search_docs -- semantic search over documentation passages (in-repo docs at the indexed commits, plus
+ * uploaded business documents, which are commit-less). Returns passages with the document, heading and text.
+ * Used to put what the DOCS say next to what the CODE does; the answer compares the two and says which wins.
+ */
+export async function searchDocs({ question, k = 6, refs = ["main"], repo = null, min_score = 0.45 }) {
+  const { embed, embedModelId, toPgVector } = await import("./service/embed.mjs");
+  const model = embedModelId();
+  const [v] = await embed([question], { isQuery: true });
+  const { commits } = await resolveScope(refs);
+  const rows = await q(
+    `select d.id as doc_id, d.name as title, d.path, d.attrs->>'source' as source, d.attrs->>'subkind' as subkind, d.attrs->'tags' as tags,
+            rp.name as repo, c.ordinal, c.heading_path, c.text, c.words,
+            (1 - (c.embedding <=> $1::vector))::float as score
+       from ckg.doc_chunks c
+       join ckg.entities d on d.blob_sha = c.blob_sha and d.kind = 'DOCUMENT'
+       left join ckg.repos rp on rp.id = d.repo_id
+      where c.model = $2 and c.embedding is not null
+        and (d.commit_sha is null or encode(d.commit_sha,'hex') = any($3::text[]))
+        and ($4::text is null or rp.name = $4)
+      order by c.embedding <=> $1::vector
+      limit $5`, [toPgVector(v), model, commits, repo, k * 3]);
+  // one passage per (doc, heading): the best-scoring; then top-k above the floor
+  const seen = new Set(); const out = [];
+  for (const r of rows) {
+    const key = `${r.doc_id}:${r.heading_path}`;
+    if (seen.has(key) || Number(r.score) < min_score) continue;
+    seen.add(key); out.push({ ...r, score: Number(r.score) });
+    if (out.length >= k) break;
+  }
+  return { model, passages: out, count: out.length };
+}

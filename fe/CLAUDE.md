@@ -102,7 +102,7 @@ Read the stream with `fetch` + `ReadableStream` (as `api.js` does). Frames are `
 |---|---|---|
 | `intent` | `{ intent: "simple"\|"code", chosen: "auto"\|"simple"\|"code" }` | first event; which answer style the service resolved. Shown as a tag on the answer. |
 | `status` | `{ text }` | progress lines: "planning (FAST_SMALLER) with 8 candidates by meaning", "looking up: A · B", "reading source at the indexed commit", "writing the plain-English answer". THIS is the progress signal (see §6). Hook keeps the last 6 in `turn.steps`. |
-| `claim` | `{ id, text, kind, name, path, line, edge, depth, evidence_ids[], confidence }` | one node of the execution path. `kind` ∈ HTTP_CALL_SITE, HTTP_ENDPOINT, SERVER_ROUTE, HANDLER, SYMBOL, DB_TABLE, EXTERNAL_SERVICE, FEATURE, OBSERVED_DEFECT, … `edge` = edge kind that led here (TARGETS, SERVES, HANDLED_BY, DECLARES, CALLS, TRIGGERS_DEFECT), null for the anchor. Rendered by TracePath. |
+| `claim` | `{ id, text, kind, name, path, line, edge, depth, evidence_ids[], confidence }` | one node of the execution path. `kind` ∈ HTTP_CALL_SITE, HTTP_ENDPOINT, SERVER_ROUTE, HANDLER, SYMBOL, DB_TABLE, EXTERNAL_SERVICE, FEATURE, OBSERVED_DEFECT, DOCUMENT (a documentation passage that matched; `name` = doc title, `text` includes the section; teal node), … `edge` = edge kind that led here (TARGETS, SERVES, HANDLED_BY, DECLARES, CALLS, TRIGGERS_DEFECT), null for the anchor. Rendered by TracePath. |
 | `evidence` | `{ id, repo, path, line, commit, ref, extractor }` | provenance for a claim (`evidence_ids` points here). `repo` decides node colour. HTTP_ENDPOINT claims have NO evidence/path on purpose (they are the contract between repos). |
 | `unresolved` | `{ fqn, path, line, reason }` | a call site whose URL is built at runtime. **A normal outcome, not an error.** Rendered as "Where the trail stops". Never red. |
 | `truncated` | `{ reason, at_depth }` | trace was bounded. Small note. |
@@ -142,7 +142,8 @@ accent `--accent #5b5bd6` (frontend nodes, focus, active states); `--amber` (bac
 `--danger` only for real errors. System font stack (no external fonts — the VM may be offline); monospace
 for paths/identifiers. Radius 14/22 px. Motion is small and respects `prefers-reduced-motion`. Every control
 has a visible `:focus-visible`. Node colours: indigo = frontend repo, amber = backend, dashed grey = the
-HTTP endpoint contract between them — the colour change IS the repo boundary.
+HTTP endpoint contract between them — the colour change IS the repo boundary; teal = a documentation
+passage (what people wrote), which is intent, not code.
 
 ## 8. Good next things to build (highest value first)
 

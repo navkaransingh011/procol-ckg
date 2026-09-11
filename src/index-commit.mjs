@@ -16,12 +16,14 @@ import * as beRoutes   from "./extractors/be-routes.mjs";
 import * as beSchema   from "./extractors/be-schema.mjs";
 import * as beExternal from "./extractors/be-external.mjs";
 import * as beAst      from "./extractors/be-ast.mjs";
+import * as docs       from "./extractors/docs.mjs";
+import { linkDocMentions } from "./doclink.mjs";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { normalizeEndpoint } from "./normalize.mjs";
 
-const EXTRACTORS = [feHttp, beRoutes, beSchema, beExternal, beAst];
+const EXTRACTORS = [feHttp, beRoutes, beSchema, beExternal, beAst, docs];
 const SECRET_PATHS = /(^|\/)(\.env|\.env\..*|.*\.pem|id_rsa.*|.*\.key|.*\.p12)$/;
 // What gets its TEXT stored (so the agent can read and grep it without a clone).
 const SOURCE_DIRS = /^(app|lib|config|db|src|spec|test)\//;
@@ -211,6 +213,28 @@ async function main() {
     }
   }
 
+  // ---------- doc chunks: content-addressed passages for semantic retrieval ----------
+  {
+    const docFiles = relevant.filter((f) => docs.handles(f.path));
+    const shas = [...new Set(docFiles.map((f) => f.blobSha))];
+    if (shas.length) {
+      const have = new Set((await q(`select distinct encode(blob_sha,'hex') h from ckg.doc_chunks where blob_sha = any($1::bytea[])`, [shas.map(hex)])).map((r) => r.h));
+      const todo = shas.filter((s) => !have.has(s));
+      if (todo.length) {
+        const facts = await loadFacts(todo, docs.NAME, docs.VERSION);
+        let rows = [];
+        for (const sha of todo) for (const c of facts.get(sha)?.chunks || []) rows.push([hex(sha), c.ordinal, c.heading_path, c.text, c.words]);
+        for (let i = 0; i < rows.length; i += 300) {
+          const b = rows.slice(i, i + 300);
+          await q(`insert into ckg.doc_chunks (blob_sha, ordinal, heading_path, text, words)
+                   select * from unnest($1::bytea[], $2::int[], $3::text[], $4::text[], $5::int[]) on conflict do nothing`,
+                  [b.map(r => r[0]), b.map(r => r[1]), b.map(r => r[2]), b.map(r => r[3]), b.map(r => r[4])]);
+        }
+        console.log(`  doc chunks stored: ${rows.length} passages from ${todo.length} new document blobs (${docFiles.length} docs in tree)`);
+      }
+    }
+  }
+
   // ---------- PHASE 2: per-commit resolution ----------
   // Always re-runs COMPLETELY. Not "changed files + one hop": that heuristic misses
   // two-hop invalidations, and a subtly stale edge is the one failure we cannot afford.
@@ -302,6 +326,13 @@ async function main() {
        b.map((e) => e.confidence), b.map((e) => e.resolution)],
     );
     edgeCount += b.length;
+  }
+
+  // uploaded documents are commit-less; re-link what they mention to this commit's nodes
+  {
+    const uploads = await q(`select id, attrs->'mentions' m from ckg.entities where kind='DOCUMENT' and commit_sha is null`);
+    let n = 0; for (const u of uploads) n += await linkDocMentions(u.id, u.m || [], { repoId, commitSha: commit.sha });
+    if (uploads.length) console.log(`  uploaded docs re-linked to this commit: ${n} mentions across ${uploads.length} documents`);
   }
 
   const inherited = await inheritObserved(repoId, commit.sha, cur?.sha);

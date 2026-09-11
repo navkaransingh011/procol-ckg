@@ -12,7 +12,7 @@ test("cross-repo join: hundreds of endpoints have BOTH a frontend caller and a b
 });
 
 test("end-to-end: frontend call site -> endpoint -> route -> handler -> Ruby method -> runtime callee", async () => {
-  const f = await findEntity({ query: "activityLogs/api.js", kind: "HTTP_CALL_SITE", limit: 1 });
+  const f = await findEntity({ query: "activityLogs/api.js", kind: "HTTP_CALL_SITE", limit: 1, refs: ["main"] });   // scope to main: nine branches hold this file
   assert.ok(f.matches.length, "call site not found");
   const tr = await traceFrom({ entity_id: Number(f.matches[0].id), refs: ["main"], depth: 6 });
   const kinds = new Set(tr.nodes.map(n => n.kind));
