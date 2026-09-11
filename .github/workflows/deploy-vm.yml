@@ -1,15 +1,23 @@
 # Deploys procol-ckg to the GCP VM on every merge to main.
 # Replaces the manual loop: push -> ssh -> git pull -> npm build -> migrate -> restart.
 #
-# Auth: Workload Identity Federation (no stored keys) + IAP tunnel (no public port 22).
+# Auth: Workload Identity Federation opens the IAP tunnel (no public port 22, no stored
+# GCP key); a static, dedicated SSH keypair logs into that tunnel as a fixed VM user.
+# OS Login is intentionally OFF for this VM -- it mints a new local username for the
+# deployer service account on every IAM/role change, which broke the deploy each time.
+# A static key against a real, stable Linux user has no such drift.
 # Setup steps are in docs/CI_DEPLOY.md. Required repo secrets/variables:
 #   secret  GCP_WIF_PROVIDER    projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
 #   secret  GCP_SERVICE_ACCOUNT ckg-deployer@<project>.iam.gserviceaccount.com
+#   secret  CKG_SSH_KEY         private half of the dedicated deploy keypair (public half is
+#                               in the VM's instance SSH-keys metadata as "VM_SSH_USER:...")
 #   var     GCP_PROJECT         procol-xxxx
 #   var     VM_NAME             procol-ckg
 #   var     VM_ZONE             asia-south1-c
-#   var     VM_REPO_DIR         /home/<repo-owner>/procol-ckg (absolute; $HOME resolves to the
-#                               OS-Login deployer account, not the repo owner, over this SSH hop)
+#   var     VM_REPO_DIR         /home/<repo-owner>/procol-ckg (absolute -- this is also the
+#                               home of VM_SSH_USER, so $HOME would work too, but explicit
+#                               is clearer)
+#   var     VM_SSH_USER         navkaran_singh
 name: Deploy to VM
 
 on:
@@ -44,17 +52,30 @@ jobs:
         with:
           project_id: ${{ vars.GCP_PROJECT }}
 
-      # The VM pulls this exact commit and rebuilds. --tunnel-through-iap means port 22
-      # never has to be open to the internet.
-      # $HOME here is the OS-Login-provisioned home for the deployer service account, not
-      # the repo owner's -- CKG_REPO_DIR pins vm-deploy.sh to where the repo actually lives.
+      # Tunnel and ssh must share one step -- a backgrounded process started in one
+      # `run:` block does not survive into the next (each step is its own shell).
       - name: Deploy over IAP
         run: |
-          gcloud compute ssh "${{ vars.VM_NAME }}" \
+          gcloud compute start-iap-tunnel "${{ vars.VM_NAME }}" 22 \
             --zone "${{ vars.VM_ZONE }}" \
-            --tunnel-through-iap \
-            --quiet \
-            --command "bash -lc 'CKG_REPO_DIR=${{ vars.VM_REPO_DIR }} bash ${{ vars.VM_REPO_DIR }}/deploy/vm-deploy.sh ${{ github.sha }}'"
+            --local-host-port=localhost:2222 \
+            --quiet &
+          TUNNEL_PID=$!
+          trap 'kill $TUNNEL_PID 2>/dev/null' EXIT
+
+          for i in $(seq 1 15); do
+            (echo > /dev/tcp/localhost/2222) 2>/dev/null && break
+            sleep 1
+          done
+
+          install -m 600 /dev/null /tmp/ckg_ci_deploy
+          printf '%s\n' "${{ secrets.CKG_SSH_KEY }}" > /tmp/ckg_ci_deploy
+          ssh -i /tmp/ckg_ci_deploy \
+            -o StrictHostKeyChecking=accept-new \
+            -o UserKnownHostsFile=/tmp/ckg_known_hosts \
+            -p 2222 "${{ vars.VM_SSH_USER }}@localhost" \
+            "bash -lc 'CKG_REPO_DIR=${{ vars.VM_REPO_DIR }} bash ${{ vars.VM_REPO_DIR }}/deploy/vm-deploy.sh ${{ github.sha }}'"
+          rm -f /tmp/ckg_ci_deploy
 
       - name: Report
         if: always()
