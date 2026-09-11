@@ -157,3 +157,21 @@ then open http://localhost:8787 on the laptop.
 For the team: put Caddy or nginx with TLS on a Procol subdomain in front of 127.0.0.1:8787 and restrict
 port 443 to office IPs or Identity-Aware Proxy. The service is still in dev auth mode; do not expose it
 publicly until the verify endpoint exists.
+
+
+## 10. Live platform data (optional, recommended)
+Add to `~/procol-ckg/.env` (never commit):
+```
+LIVE_DATABASE_URL=postgresql://<readonly_user>:<password>@35.200.252.20:5432/agribid-uat-latest?sslmode=no-verify
+LIVE_SYNC_INTERVAL_S=60
+```
+Then apply the migration, load once, and run the poller as a service:
+```
+psql "$CKG_DATABASE_URL" -f sql/012_live.sql
+npm run sync:live:once                     # first load ~1 min (~300k rows across 10 tables)
+sudo cp deploy/ckg-live-sync.service /etc/systemd/system/ && sudo sed -i "s/__USER__/$USER/g; s#__HOME__#$HOME#g" /etc/systemd/system/ckg-live-sync.service
+sudo systemctl daemon-reload && sudo systemctl enable --now ckg-live-sync && journalctl -u ckg-live-sync -n 3 --no-pager
+```
+Security: the mirror holds only the allowlisted columns in `config/live_tables.json`. Use a UAT role that is
+SELECT-only on those tables (the shared `developer` login can UPDATE -- ask the DBA for `ckg_readonly`), and
+rotate any password that has been pasted into a chat. The VM must be able to reach UAT on 5432.

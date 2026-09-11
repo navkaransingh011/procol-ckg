@@ -1,0 +1,19 @@
+# Live mirror of allowlisted UAT tables (config/live_tables.json). Install next to ckg.service:
+#   sudo cp ~/procol-ckg/deploy/ckg-live-sync.service /etc/systemd/system/
+#   sudo sed -i "s/__USER__/$USER/g; s#__HOME__#$HOME#g" /etc/systemd/system/ckg-live-sync.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now ckg-live-sync
+[Unit]
+Description=Procol Code Graph - live platform data mirror
+After=network.target postgresql.service
+
+[Service]
+User=__USER__
+WorkingDirectory=__HOME__/procol-ckg
+ExecStart=/usr/bin/node --env-file=.env src/sync-live.mjs
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

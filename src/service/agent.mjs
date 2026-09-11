@@ -3,7 +3,7 @@
 // The model's job here is small and bounded: pick tools, then write prose over
 // structured results it cannot edit. It never sees source code and never invents
 // a fact. Everything it can cite came from a deterministic extractor.
-import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, semanticAnchor, searchDocs, NARRATIVE_EDGES } from "../tools.mjs";
+import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, semanticAnchor, searchDocs, queryLive, LIVE_DOC, NARRATIVE_EDGES } from "../tools.mjs";
 import { q } from "../db.mjs";
 import { createHash } from "node:crypto";
 import { runSql, SCHEMA_DOC } from "../sqltool.mjs";
@@ -475,6 +475,7 @@ Given a question, output ONLY a JSON object -- no prose, no markdown fences:
 {"lookups": [{"q": "<one specific identifier>"}],
  "lists":   [{"kind": "<ENTITY_KIND>", "path_prefix": "<optional dir>", "name_contains": "<optional>", "subkind": "<optional, see note>"}],
  "sql": ["<one read-only SELECT against v_nodes / v_edges when no lookup shape above fits; optional>"],
+ "live": [{"table": "<one of the live tables below>", "where": {"<col>": "<exact value>"}, "like": {"<col>": "<substring>"}, "limit": 50}],
  "endpoint_families": ["<URL path prefix, e.g. /approval_workflow/approval_requests>"],
  "greps": ["<exact code token to find every occurrence of, e.g. self.mcp? or token_type>"],
  "want_source": <true if answering needs the actual code: any "why", "how does it decide", "what does it check",
@@ -485,6 +486,15 @@ Given a question, output ONLY a JSON object -- no prose, no markdown fences:
 Use "sql" only when the fixed shapes cannot express what you need (a join, a count, a filter on attrs).
 Schema for "sql":
 ${SCHEMA_DOC}
+Use "live" (max 3) when the question asks what is ON or OFF, enabled, configured, active, which companies or
+templates have something, or the CURRENT state of configuration -- that is data in the platform database, not code.
+Live tables (a read-only mirror of UAT, allowlisted columns only):
+${LIVE_DOC}
+Patterns: a company by name -> {"table":"companies","like":{"name":"reliance"}}; a switch by key ->
+{"table":"master_configurations","like":{"config_key":"three_way"}} then {"table":"custom_configurations","like":{"config_key":"three_way"}};
+approvals for a company -> TWO entries: {"table":"companies","like":{"name":"reliance"}} and
+{"table":"approval_flows","where":{"company_id":"$companies.id"}} -- a value "$<table>.<column>" is filled in by the
+service with the ids the first query returned. Prefer like{} on names/keys; keep limit <= 50.
 Use "endpoint_families" when the question is about all the callers or handlers of a URL family.
 Use "greps" for "every place that ..." questions about a concrete token; the grep runs on the exact
 indexed commit and returns file:line with context. Prefer distinctive tokens (self.mcp?, not "session").
@@ -563,6 +573,17 @@ DOCUMENTS -- what people WROTE the system should do (business logic), next to wh
   runtime calls) win over a document when they disagree; say the doc may be stale.
 - Never treat a document as proof that code exists. A doc naming a method is a MENTION, not a definition.
 
+LIVE PLATFORM DATA -- the CURRENT configuration, from a read-only mirror of the UAT database
+- "live" entries are rows from allowlisted UAT tables: which company has which config on, which templates and
+  approval flows exist and their status. They are STATE as of "as_of" (say the time), on UAT (say so: UAT is
+  not production). "total" is exact; if "complete" is false say "showing N of M".
+- status columns: 1 = active/on, 0 = inactive/off, unless the facts say otherwise. custom_configurations
+  overrides master_configurations for that company/template; the "modifications" column holds the override value.
+- "live_config_greps" show where the CODE reads a config_key that came back from live data -- this is the join
+  between configuration and behaviour. Use it: "X is on for <company> (as of ...), and the code checks it in <file:line>".
+- Three sources, three roles: documents = the intended rule; code = how it is enforced; live = who has it on now.
+  Keep them distinct in the answer, and never present live state as the rule or the rule as the state.
+
 SOURCE, GREPS AND FAMILIES -- when present, these are authoritative
 - "source" entries are the ACTUAL CODE at the indexed commit (numbered lines). You may explain logic,
   conditions and guards from them, and you must cite path:line taken from those line numbers.
@@ -605,6 +626,10 @@ HARD RULES
 - If "truncated" is true or "hubs_not_expanded" is non-empty, say so.
 - Name the refs read: they are in facts.refs. Tenants run different code.
 - Prefer precision over completeness. A shorter correct answer beats a longer padded one.
+- THIS SYSTEM IS READ-ONLY. It cannot change, enable, disable, create or delete anything -- not code, not
+  configuration, not platform data -- and it has no connection that could. If the question asks for a change,
+  say plainly that you cannot and only report the current state, then say where a human would make the change
+  (the admin screen or config table involved, from the facts). Never imply an action was taken.
 - Never enumerate more than 12 items inline. Name the 12 most relevant, then say "and N more" with the
   exact count from the facts. Long lists crowd out sections 4-6, and an answer cut off before section 5
   hides the gaps -- the one thing this system must never do.
@@ -630,6 +655,8 @@ WRITE LIKE THIS
   present, explain the intended behaviour from them in plain words, then say whether the code agrees. If the
   doc and the code disagree, say so plainly -- that is exactly what a CS or product person needs to know.
   Name the document by its title (and section) so they can open it.
+- "live" rows are the current configuration on UAT (not production) as of the time shown: who has what switched
+  on, which templates and approval flows exist. Say the time and "on UAT". Status 1 means on, 0 off.
 - Describe the flow as a short story: the person does X on a screen, the system checks Y, then Z happens,
   and the result is stored so it can be shown later.
 - 4 to 8 sentences, then optionally a short "In the code" line naming 1-3 real files for an engineer who
@@ -644,7 +671,9 @@ HARD RULES -- these keep it honest
 - If nothing matched (match: "none" everywhere), say you could not find it in the indexed code and suggest
   rephrasing with a feature or screen name. Do not guess.
 - Every file you name in the optional "In the code" line must appear in the facts.
-- Do NOT narrate the machinery: never write "the anchor", "unresolved", "truncated", "hops", "the trace".`;
+- Do NOT narrate the machinery: never write "the anchor", "unresolved", "truncated", "hops", "the trace".
+- You can only READ. If asked to change, switch on/off, add or remove anything, say you cannot do that here,
+  report what the current state is, and point to where a person would change it.`;
 
 function extractJson(text) {
   const a = text.indexOf("{"), b = text.lastIndexOf("}");
@@ -776,6 +805,7 @@ function shrink(facts, budget) {
     () => { for (const l of facts.lists || []) l.items = l.items.slice(0, 15); },
     () => { for (const r of facts.lookups) { if (r.downstream) r.downstream = r.downstream.slice(0, 12); if (r.upstream_callers) r.upstream_callers = r.upstream_callers.slice(0, 6); } },
     () => { for (const f of facts.endpoint_families || []) f.family = (f.family || []).slice(0, 12).map(e => ({ ...e, callers: (e.callers || []).slice(0, 6) })); },
+    () => { for (const l of facts.live || []) if (l.rows) l.rows = l.rows.slice(0, 15); },
     () => { if (facts.documents) facts.documents = facts.documents.slice(0, 3).map(d => ({ ...d, text: d.text.slice(0, 900) })); },
     () => { if (facts.source) facts.source = facts.source.slice(0, 2); },
     () => { delete facts.greps; },
@@ -812,6 +842,35 @@ async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYST
   emit({ type: "token", text: clean.text });
   if (clean.removed) emit({ type: "status", text: `removed ${clean.removed} file path${clean.removed > 1 ? "s" : ""} the model guessed but was not given` });
   return clean.text;
+}
+
+/**
+ * Run the planner's live queries. Two rounds: queries whose filter values reference another live table's
+ * column ("$companies.id") wait for that table's rows and are expanded to the ids found (cap 50). This lets
+ * "approval flows for Reliance" resolve company -> flows without a second model call.
+ */
+async function runLivePlan(specs) {
+  const list = (specs || []).filter(x => x && typeof x.table === "string").slice(0, 4);
+  const refRe = /^\$([a-z_]+)\.([a-z_]+)$/;
+  const dependsOn = (x) => Object.values(x.where || {}).map(v => typeof v === "string" && v.match(refRe)).filter(Boolean);
+  const run = (x) => queryLive({ table: x.table, where: x.where || {}, like: x.like || {}, limit: Math.min(Number(x.limit) || 50, 50) }).catch(e => ({ error: e.message, table: x.table }));
+  const first = list.filter(x => !dependsOn(x).length), second = list.filter(x => dependsOn(x).length);
+  const results = await Promise.all(first.map(run));
+  const byTable = new Map(first.map((x, i) => [x.table, results[i]]));
+  for (const x of second) {
+    const where = { ...(x.where || {}) };
+    let ok = true;
+    for (const [c, v] of Object.entries(where)) {
+      const m = typeof v === "string" && v.match(refRe);
+      if (!m) continue;
+      const src = byTable.get(m[1]);
+      const ids = [...new Set((src?.rows || []).map(r => r[m[2]]).filter(v2 => v2 !== null && v2 !== undefined))].slice(0, 50);
+      if (!ids.length) { ok = false; results.push({ table: x.table, error: `no ${m[1]} rows to take ${m[2]} from` }); break; }
+      where[c] = ids.map(String);
+    }
+    if (ok) results.push(await run({ ...x, where }));
+  }
+  return results;
 }
 
 async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
@@ -857,13 +916,21 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
   const prefs = (plan?.endpoint_families || []).filter(x => typeof x === "string" && x.startsWith("/")).slice(0, 3);
   for (const pref of prefs) emit({ type: "status", text: `mapping every endpoint under ${pref}` });
 
-  const [results, listRes, sqlRes, famRes, docRes] = await Promise.all([
+  const [results, listRes, sqlRes, famRes, docRes, liveRes] = await Promise.all([
     Promise.all(lookups.map(l => lookupOne(l, refs, emit, seen))),
     Promise.all(specs.map(spec => listEntities({ kind: spec.kind, path_prefix: spec.path_prefix ?? null, name_contains: spec.name_contains ?? null, subkind: spec.subkind ?? null, refs, limit: LIST_LIMIT }))),
     Promise.all(sqlStmts.map(stmt => runSql({ sql: stmt }).then(r => ({ stmt, r })))),
     Promise.all(prefs.map(pref => endpointFamily({ path_prefix: pref, refs }))),
     searchDocs({ question, k: 6, refs }).catch(() => ({ passages: [] })),   // what the DOCS say, next to what the code does
+    runLivePlan(plan?.live),
   ]);
+  const live = liveRes.filter(Boolean);
+  for (const l of live) emit({ type: "status", text: l.error ? `live data: ${l.error}` : `live platform data: ${l.table} — ${l.total} row${l.total === 1 ? "" : "s"}${l.complete ? "" : ` (showing ${l.returned})`}, as of ${l.as_of ? new Date(l.as_of).toISOString().slice(11, 16) + " UTC" : "unknown"}` });
+  // three-way join: any config_key that came back from live data -> where the CODE reads it (repo-wide grep)
+  const liveKeys = [...new Set(live.flatMap(l => (l.rows || []).map(r => r.config_key).filter(Boolean)))].slice(0, 3);
+  const liveGreps = [];
+  for (const k of liveKeys) { const g = await grepSource({ repo: "procol-backend", pattern: k, refs, max_hits: 12, context: 1 }).catch(() => null); if (g && !g.error && g.total_hits) liveGreps.push(g); }
+  if (liveGreps.length) emit({ type: "status", text: `where the code reads ${liveKeys.join(", ")}: ${liveGreps.reduce((a, g) => a + g.total_hits, 0)} places` });
   const documents = (docRes.passages || []).map(p => ({ title: p.title, path: p.path, source: p.source || "repo", kind: p.subkind, tags: p.tags,
                                                         heading: p.heading_path, score: Number(p.score.toFixed(2)), text: p.text.slice(0, 1800) }));
   if (documents.length) {
@@ -975,6 +1042,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
                   ...(families.length ? { endpoint_families: families } : {}),
                   ...(source.length ? { source } : {}), ...(greps.length ? { greps } : {}),
                   ...(documents.length ? { documents } : {}),
+                  ...(live.length ? { live } : {}), ...(liveGreps.length ? { live_config_greps: liveGreps } : {}),
                   ...(summaries ? { overviews: summaries } : {}), ...(owners ? { owners } : {}) };
 
   // Phase C: answer (bounded payload, one retry)

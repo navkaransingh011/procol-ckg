@@ -499,3 +499,48 @@ export async function searchDocs({ question, k = 6, refs = ["main"], repo = null
   }
   return { model, passages: out, count: out.length };
 }
+
+// ---------------------------------------------------------------------------------
+// LIVE PLATFORM DATA -- a read-only mirror of a few allowlisted UAT tables (config/live_tables.json),
+// kept fresh by src/sync-live.mjs. The model never touches UAT; it asks this bounded tool.
+// ---------------------------------------------------------------------------------
+import { readFileSync as _rf } from "node:fs";
+export const LIVE_TABLES = JSON.parse(_rf(new URL("../config/live_tables.json", import.meta.url), "utf8")).tables;
+export const LIVE_DOC = Object.entries(LIVE_TABLES).map(([t, s]) => `- live.${t} (${s.columns.join(", ")}): ${s.describe}`).join("\n");
+const lident = (s) => { if (!/^[a-z_][a-z0-9_]*$/.test(s)) throw new Error(`bad identifier ${s}`); return `"${s}"`; };
+
+export async function liveFreshness() {
+  const rows = await q(`select table_name, rows_total, last_run, last_cursor, last_error from live.sync_state order by 1`).catch(() => []);
+  return { tables: rows, as_of: rows.reduce((m, r) => (!m || (r.last_run && r.last_run > m)) ? r.last_run : m, null) };
+}
+
+/**
+ * query_live -- SELECT allowlisted columns from ONE mirrored table with equality / substring filters.
+ * Never joins arbitrary SQL; company lookups by name go through where/like on live.companies first.
+ * Returns rows, the exact total, and as_of (when this table was last synced) -- answers must say both.
+ */
+export async function queryLive({ table, where = {}, like = {}, columns = null, limit = 50, order_by = null }) {
+  const spec = LIVE_TABLES[table];
+  if (!spec) return { error: `not a live table: ${table}. Allowed: ${Object.keys(LIVE_TABLES).join(", ")}` };
+  const cols = (columns && columns.length ? columns : spec.columns).filter(c => spec.columns.includes(c));
+  if (!cols.length) return { error: "no allowed columns requested" };
+  const params = []; const conds = [];
+  for (const [c, v] of Object.entries(where || {})) {
+    if (!spec.columns.includes(c)) return { error: `column ${c} is not allowed on ${table}` };
+    if (Array.isArray(v)) { params.push(v); conds.push(`${lident(c)}::text = any($${params.length}::text[])`); }
+    else if (v === null) conds.push(`${lident(c)} is null`);
+    else { params.push(String(v)); conds.push(`${lident(c)}::text = $${params.length}`); }
+  }
+  for (const [c, v] of Object.entries(like || {})) {
+    if (!spec.columns.includes(c)) return { error: `column ${c} is not allowed on ${table}` };
+    params.push(`%${String(v)}%`); conds.push(`${lident(c)}::text ilike $${params.length}`);
+  }
+  const whereSql = conds.length ? `where ${conds.join(" and ")}` : "";
+  const lim = Math.min(Math.max(1, Number(limit) || 50), 200);
+  const ord = order_by && spec.columns.includes(order_by) ? `order by ${lident(order_by)} desc` : `order by ${lident(spec.cursor)} desc`;
+  const [{ n }] = await q(`select count(*)::int n from live.${lident(table)} ${whereSql}`, params);
+  const rows = await q(`select ${cols.map(lident).join(", ")}, synced_at from live.${lident(table)} ${whereSql} ${ord} limit ${lim}`, params);
+  const [st] = await q(`select last_run from live.sync_state where table_name=$1`, [table]);
+  return { table, where, like, total: n, returned: rows.length, complete: n <= rows.length, as_of: st?.last_run ?? null, source: "UAT platform database (mirror)",
+           rows: rows.map(r => { const o = { ...r }; delete o.synced_at; for (const k of Object.keys(o)) if (typeof o[k] === "string" && o[k].length > 600) o[k] = o[k].slice(0, 600) + "…"; return o; }) };
+}

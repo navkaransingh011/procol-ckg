@@ -206,6 +206,24 @@ search, linked by `MENTIONS` edges to the code they name. Two sources, one pipel
 Answers put the documented rule next to the code and say whether they agree, conflict, or the code side is
 not visible; code wins on conflict and the answer says the doc may be stale.
 
+## Live platform data (UAT mirror)
+
+A read-only mirror of a few platform tables -- configs, templates, approval flows, flexi datasources -- lives in
+schema `live` of our own Postgres, so answers can join **what the docs intend**, **what the code enforces**, and
+**who has it switched on right now**. The model never touches UAT.
+
+- `config/live_tables.json` is the allowlist: 10 tables, 93 columns. Only those columns are ever SELECTed
+  (PII, secrets and filled-in commercial data are not; e.g. `procol_variables.value` is excluded).
+- `src/sync-live.mjs` polls by `updated_at` every 60 s (first load ~1 min for ~300k rows, then ~1.5 s a pass)
+  and reconciles ids every 30 min to see deletes. Runs as `deploy/ckg-live-sync.service` on the VM.
+  Why polling: UAT is Postgres 14 with `wal_level=replica`; column-filtered logical replication needs 15+ and a
+  restart. Polling reaches the same freshness within a minute and keeps sensitive columns from ever leaving.
+- `query_live` is the only door: one allowlisted table, equality/substring filters, 200-row cap, exact total,
+  `as_of` timestamp. The planner may chain `"company_id": "$companies.id"` to resolve a company by name first.
+- Any `config_key` that comes back is grepped in the backend so the answer can say where the code reads it.
+- `.env` needs `LIVE_DATABASE_URL` (a UAT connection; use `sslmode=no-verify`, the cert is self-signed) and
+  optionally `LIVE_SYNC_INTERVAL_S`. **Ask for a read-only UAT role**: the `developer` login can write.
+
 ## Self-contained database
 
 The indexer stores the text of every source file it sees (`ckg.blob_text`, content-addressed), so READ
