@@ -3,7 +3,7 @@
 // The model's job here is small and bounded: pick tools, then write prose over
 // structured results it cannot edit. It never sees source code and never invents
 // a fact. Everything it can cite came from a deterministic extractor.
-import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, NARRATIVE_EDGES } from "../tools.mjs";
+import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, semanticAnchor, NARRATIVE_EDGES } from "../tools.mjs";
 import { q } from "../db.mjs";
 import { runSql, SCHEMA_DOC } from "../sqltool.mjs";
 import { chat, chatStream, provider } from "./llm.mjs";
@@ -81,6 +81,7 @@ export async function ask({ question, refs = ["main"], emit }) {
 
   if (p.mock) return mockRun({ question, refs, emit, t0 });
   if (mode() === "sql") return sqlRun({ question, refs, emit, t0, p });
+  if (mode() === "auto") return routeAuto({ question, refs, emit, t0, p });
   if (mode() === "plan") return planRun({ question, refs, emit, t0, p });
   if (mode() === "guided") return guidedRun({ question, refs, emit, t0, p });
 
@@ -376,7 +377,11 @@ STRICT RULES
 - If "hubs_not_expanded" is non-empty, name them and say they were skipped because too
   many things call them.
 - If "approximate_match" is true, open by saying the match was approximate.
-- Say which refs were read: ${refs.join(", ")}.
+- Write for a colleague, not a log: describe what the code does and where. Do NOT narrate the
+  mechanics -- never write "the anchor is", "the unresolved list is empty", "truncated is false",
+  "no hubs were skipped", "the match was exact". Mention unresolved/truncated/hubs ONLY when they
+  are non-empty or true, in one sentence at the end.
+- End with the refs read (${refs.join(", ")}) in a short trailing clause.
 - 6 sentences maximum. No preamble, no bullet lists.
 
 FACTS
@@ -408,6 +413,8 @@ ${JSON.stringify(facts, null, 1).slice(0, 12000)}`;
                + "evidence above come from the code graph and are unaffected.)" });
   }
 
+  emitContextPaths(JSON.stringify(facts), emit);
+  await emitRefsFooter(refs, emit);
   const summary = { type: "done", claim_count: claims.length, evidence_count: ev.evidence.length,
                     tool_calls: 4, unresolved_count: (fwd.unresolved ?? []).length,
                     refs, provider: `${p.base} · ${p.model}`, mode: "guided", ms: Date.now() - t0 };
@@ -471,7 +478,13 @@ Rules for lookups (max 8):
 - For frontend code, use the file path fragment, e.g. "src/redux/orders/api.js".
 - For cross-repo questions include BOTH ends: the frontend file or route AND the backend handler/method.
 - If the question names a bug or behaviour, look up the method most likely to contain it.
-- Order lookups by importance.`;
+- Order lookups by importance.
+- If CANDIDATE NODES are provided with the question, they are real graph names ranked by meaning. Prefer them
+  as lookups when they fit the question; add your own only for what they miss.
+- Lists must be specific: a path_prefix needs at least two segments (app/services/awarding, src/redux/approvals),
+  never a repo root like "src" or "app/controllers". Prefer name_contains for a topic word ("approval").
+- For "how does X work" / "what is X" / overview questions: set want_summaries true, look up the FEATURE and the
+  main frontend file, and add one endpoint_family for the URL prefix the feature uses.`;
 
 const ANSWER_SYSTEM = `You are a senior engineer answering questions about Procol's codebase from a VERIFIED code
 knowledge graph. You will receive FACTS as JSON. You know nothing about this codebase except those facts.
@@ -530,8 +543,12 @@ ANSWER FORMAT (use these headings, keep it tight)
 2. Evidence path -- numbered hops. Each hop: kind, name, path:line, and [RUNTIME] / [EXACT] / [HEURISTIC]
    where it matters. Frontend -> endpoint -> route -> handler -> methods -> data.
 3. Data & side effects -- tables, columns, external services touched, if any appear in the facts.
+   Only DB_TABLE nodes are tables (snake_case names from db/schema.rb). A Ruby class such as Workflow or
+   Approval is a MODEL -- label it "model", never "table".
 4. Known defects on this path -- summary, root cause, fix, from defect records; or "none recorded".
 5. What the graph cannot tell you -- concrete gaps, and the exact file:line to open to close each one.
+   The file you point at MUST appear in the facts. If the facts hold no such file, describe the thing
+   ("the Bid model") without a path -- never guess a path, not even with "likely" or "probably".
 6. Confidence -- high / medium / low, with one reason.
 
 HARD RULES
@@ -543,7 +560,15 @@ HARD RULES
 - If "unresolved" is non-empty, say the trace stops there and why.
 - If "truncated" is true or "hubs_not_expanded" is non-empty, say so.
 - Name the refs read: they are in facts.refs. Tenants run different code.
-- Prefer precision over completeness. A shorter correct answer beats a longer padded one.`;
+- Prefer precision over completeness. A shorter correct answer beats a longer padded one.
+
+OVERVIEW QUESTIONS ("how does X work", "what is X", "explain X")
+- Section 1 becomes a plain-English explanation for a non-engineer, 4-8 sentences: what it lets a user do,
+  the screens or frontend files involved, the backend endpoints and handlers they call, and the data behind it.
+  Lead with "overviews" when present, then ground each statement in a named file or endpoint from the facts.
+- Do NOT narrate retrieval mechanics. Never write "the anchor is", "the unresolved list is empty",
+  "truncated is false", "no hubs were skipped", "the match was exact". Mention a gap only when it changes
+  the answer, and only in section 5.`;
 
 function extractJson(text) {
   const a = text.indexOf("{"), b = text.lastIndexOf("}");
@@ -585,7 +610,7 @@ async function lookupOne(qstr, refs, emit, seen) {
     suggested_fix: n.attrs?.suggested_fix, trigger_condition: n.attrs?.trigger_condition, confidence: n.attrs?.confidence }));
   return {
     q: qstr, match: weak ? "approximate" : "exact", matched_on: token,
-    anchor: { kind: seed.kind, name: seed.name || seed.fqn, path: seed.path, line: seed.start_line, resolution: seed.resolution,
+    anchor: { id: Number(seed.id), kind: seed.kind, name: seed.name || seed.fqn, path: seed.path, line: seed.start_line, resolution: seed.resolution,
               repo: evById.get(String(seed.id))?.repo ?? null },
     columns: seed.kind === "DB_TABLE" ? seed.attrs?.columns ?? null : undefined,
     downstream: fwd.nodes.slice(0, 45).map(hop),
@@ -597,80 +622,156 @@ async function lookupOne(qstr, refs, emit, seen) {
   };
 }
 
+// ---- routing: exact identifier + simple trace question -> guided (sub-second);
+// anything asked in plain words, or asking why/how/what-if -> plan (deep).
+const OVERVIEW_RE = /\b(how does|how do|how is|how are|what is|what are|what does|explain|overview|walk me through|works?)\b/i;
+const THOUGHT_RE = /\b(why|what if|guard|check|decide|should|impact|every|all|which|who|owns?|built)\b/i;
+const IDENTIFIER_RE = /[\/#.:_]|[a-z][A-Z]/;
+export const isOverview = (qs) => OVERVIEW_RE.test(qs);
+
+/** Every answer ends with the refs and commits it was read from. The service says this, not the model. */
+async function emitRefsFooter(refs, emit) {
+  const scope = await resolveScope(refs);
+  const parts = scope.refs.map(r => `${r.repo}@${r.sha.slice(0, 8)}`);
+  emit({ type: "token", text: `\n\nRead from ${refs.join(", ")}: ${parts.join(" · ")}` });
+}
+
+/** Every file path the model was shown, so a checker can tell "invented" from "given in a list". */
+function emitContextPaths(factsJson, emit) {
+  const paths = new Set((factsJson.match(/[\w./-]+\.(?:rb|js|jsx|ts|tsx|yml|erb)\b/g) || []).filter(x => x.includes("/")));
+  if (paths.size) emit({ type: "context_paths", paths: [...paths].slice(0, 400) });
+}
+
+async function routeAuto({ question, refs, emit, t0, p }) {
+  const a = await anchor(question, refs);
+  // A plain English word that happens to equal a class name ("workflows" -> module Workflows) is NOT an exact
+  // anchor. Only identifier-shaped tokens (paths, Class#method, snake_case, CamelCase) qualify for the fast path.
+  const exactIdent = !!a.seed && !a.weak && IDENTIFIER_RE.test(a.token || "");
+  if (exactIdent && !isOverview(question) && !THOUGHT_RE.test(question)) return guidedRun({ question, refs, emit, t0, p });
+  return planRun({ question, refs, emit, t0, p });
+}
+
+const PLAN_LOOKUPS = 6, PLAN_TOTAL_LOOKUPS = 8, PLAN_LISTS = 3, LIST_LIMIT = 40, FACTS_BUDGET = 30000;
+const tooBroad = (spec) => ["SYMBOL", "HTTP_CALL_SITE", "HANDLER", "SERVER_ROUTE", "HTTP_ENDPOINT"].includes(spec.kind)
+  && !spec.name_contains && (!spec.path_prefix || spec.path_prefix.split("/").filter(Boolean).length < 2);
+
+/** Cut the facts down to a size the model reliably handles, least important first. */
+function shrink(facts, budget) {
+  const size = () => JSON.stringify(facts, null, 1).length;
+  const steps = [
+    () => { if (facts.greps) facts.greps = facts.greps.map(g => ({ ...g, files: (g.files || []).slice(0, 6).map(f => ({ ...f, hits: (f.hits || []).slice(0, 4) })) })); },
+    () => { for (const l of facts.lists || []) l.items = l.items.slice(0, 15); },
+    () => { for (const r of facts.lookups) { if (r.downstream) r.downstream = r.downstream.slice(0, 12); if (r.upstream_callers) r.upstream_callers = r.upstream_callers.slice(0, 6); } },
+    () => { for (const f of facts.endpoint_families || []) f.family = (f.family || []).slice(0, 12).map(e => ({ ...e, callers: (e.callers || []).slice(0, 6) })); },
+    () => { if (facts.source) facts.source = facts.source.slice(0, 2); },
+    () => { delete facts.greps; },
+    () => { for (const l of facts.lists || []) l.items = l.items.slice(0, 6); },
+    () => { for (const r of facts.lookups) { if (r.downstream) r.downstream = r.downstream.slice(0, 6); delete r.upstream_callers; } },
+    () => { delete facts.source; },
+  ];
+  for (const step of steps) { if (size() <= budget) break; step(); }
+  const json = JSON.stringify(facts, null, 1);
+  return json.length > budget ? json.slice(0, budget) : json;
+}
+
+/** Stream the answer; if the model call fails, retry once with half the facts, non-streaming. */
+async function writeAnswer({ question, facts, emit, budget }) {
+  let text = "";
+  const run = async (json, stream) => {
+    const messages = [{ role: "system", content: ANSWER_SYSTEM }, { role: "user", content: `QUESTION: ${question}\n\nFACTS:\n${json}` }];
+    if (stream) { for await (const d of chatStream({ messages, max_tokens: 1800, temperature: 0.1 })) { text += d; emit({ type: "token", text: d }); } }
+    else { const m = await chat({ messages, max_tokens: 1800, temperature: 0.1 }); text = m.content || ""; if (text) emit({ type: "token", text }); }
+  };
+  try { await run(shrink(structuredClone(facts), budget), true); }
+  catch (e) { emit({ type: "status", text: `answer failed (${String(e.message).slice(0, 80)}); retrying with fewer facts` }); }
+  if (!text) {
+    try { await run(shrink(structuredClone(facts), Math.floor(budget / 2)), false); }
+    catch (e) { emit({ type: "error", code: "llm_failed", message: e.message }); }
+  }
+  if (!text) emit({ type: "token", text: "(No prose available - the language model call failed twice. The claims and evidence above come from the code graph and are unaffected.)" });
+  return text;
+}
+
 async function planRun({ question, refs, emit, t0, p }) {
+  // Phase 0: candidates by MEANING. Fails soft when no embeddings exist. The pilot measured this as the
+  // difference between 5/8 and 7/8 on questions asked in everyday words.
+  let sem = [];
+  try { sem = (await semanticAnchor({ question, k: 8, refs })).matches.filter(m => Number(m.score) >= 0.55); } catch { /* no embeddings for this model */ }
+  const candText = sem.length
+    ? "\n\nCANDIDATE NODES (real graph names ranked by meaning; use their exact names as lookups when they fit):\n"
+      + sem.map(m => `- ${m.kind} | ${m.name || m.fqn} | ${m.path || ""}`).join("\n")
+    : "";
+
   // Phase A: plan
-  emit({ type: "status", text: `planning lookups (${p.model})` });
+  emit({ type: "status", text: `planning (${p.model})${sem.length ? ` with ${sem.length} candidates by meaning` : ""}` });
   let plan = null;
   try {
-    const m = await chat({ messages: [{ role: "system", content: PLAN_SYSTEM }, { role: "user", content: question }], max_tokens: 500, temperature: 0 });
+    const m = await chat({ messages: [{ role: "system", content: PLAN_SYSTEM }, { role: "user", content: `QUESTION: ${question}${candText}` }], max_tokens: 600, temperature: 0 });
     plan = extractJson(m.content || "");
-  } catch (e) { emit({ type: "status", text: `planner failed (${e.message.slice(0, 60)}); falling back to identifier extraction` }); }
-  let lookups = (plan?.lookups || []).map(l => String(l.q || "").trim()).filter(Boolean).slice(0, 8);
-  // Safety net: the planner sometimes drops the proper noun the question is about. Append the
-  // most specific identifiers we can extract ourselves, deduped, up to 10 total.
-  const have = new Set(lookups.map(x => x.toLowerCase()));
-  for (const c of candidates(question)) { if (lookups.length >= 10) break; if (!have.has(c.toLowerCase())) { lookups.push(c); have.add(c.toLowerCase()); } }
+  } catch (e) { emit({ type: "status", text: `planner failed (${String(e.message).slice(0, 60)}); using identifiers and candidates` }); }
+
+  const lookups = [];
+  const have = new Set();
+  const add = (x) => { const k = String(x || "").trim(); if (k && !have.has(k.toLowerCase()) && lookups.length < PLAN_TOTAL_LOOKUPS) { lookups.push(k); have.add(k.toLowerCase()); } };
+  for (const l of (plan?.lookups || []).slice(0, PLAN_LOOKUPS)) add(l?.q);
+  for (const m of sem.filter(m => Number(m.score) >= 0.62).slice(0, 2)) add(m.name || m.fqn);   // union with meaning
+  for (const c of candidates(question).filter(t => IDENTIFIER_RE.test(t))) add(c);            // identifiers only, never plain words
+  if (!lookups.length) for (const m of sem.slice(0, 3)) add(m.name || m.fqn);
   emit({ type: "status", text: `looking up: ${lookups.join(" · ")}` });
 
-  // Phase B: retrieve
+  // Phase B: retrieve -- everything independent runs at once
   const seen = new Set();
-  const results = [];
-  for (const l of lookups) results.push(await lookupOne(l, refs, emit, seen));
+  const specs = (plan?.lists || []).slice(0, PLAN_LISTS).filter(spec => {
+    if (!spec?.kind) return false;
+    if (tooBroad(spec)) { emit({ type: "status", text: `skipped a too-broad list (${spec.kind}${spec.path_prefix ? ` under ${spec.path_prefix}` : ""})` }); return false; }
+    emit({ type: "status", text: `listing ${spec.kind}${spec.path_prefix ? ` under ${spec.path_prefix}` : ""}${spec.name_contains ? ` matching "${spec.name_contains}"` : ""}` });
+    return true;
+  });
+  const sqlStmts = (plan?.sql || []).filter(x => typeof x === "string" && /^\s*(with|select)\b/i.test(x)).slice(0, 2);
+  const prefs = (plan?.endpoint_families || []).filter(x => typeof x === "string" && x.startsWith("/")).slice(0, 3);
+  for (const pref of prefs) emit({ type: "status", text: `mapping every endpoint under ${pref}` });
+
+  const [results, listRes, sqlRes, famRes] = await Promise.all([
+    Promise.all(lookups.map(l => lookupOne(l, refs, emit, seen))),
+    Promise.all(specs.map(spec => listEntities({ kind: spec.kind, path_prefix: spec.path_prefix ?? null, name_contains: spec.name_contains ?? null, subkind: spec.subkind ?? null, refs, limit: LIST_LIMIT }))),
+    Promise.all(sqlStmts.map(stmt => runSql({ sql: stmt }).then(r => ({ stmt, r })))),
+    Promise.all(prefs.map(pref => endpointFamily({ path_prefix: pref, refs }))),
+  ]);
   const matched = results.filter(r => r.match !== "none").length;
   emit({ type: "status", text: `${matched}/${results.length} lookups matched a node` });
 
-  // SETS -- the operation a point lookup cannot express
-  const lists = [];
-  for (const spec of (plan?.lists || []).slice(0, 5)) {
-    if (!spec?.kind) continue;
-    emit({ type: "status", text: `listing ${spec.kind}${spec.path_prefix ? ` under ${spec.path_prefix}` : ""}` });
-    const r = await listEntities({ kind: spec.kind, path_prefix: spec.path_prefix ?? null,
-                                   name_contains: spec.name_contains ?? null, subkind: spec.subkind ?? null,
-                                   refs, limit: 250 });
-    lists.push({ asked: spec, total: r.total, returned: r.returned, complete: r.complete, by_subkind: r.by_subkind,
-                 items: r.items.map(i => ({ name: i.name, path: i.path, line: i.start_line, kind: i.kind,
-                   ...(i.kind === "FEATURE" ? { sources: i.attrs?.sources, bullets: (i.attrs?.bullets || []).slice(0, 6) } : {}),
-                   ...(i.attrs?.activity ? { activity: i.attrs.activity } : {}) })) });
-  }
+  const lists = listRes.map((r, i) => ({ asked: specs[i], total: r.total, returned: r.returned, complete: r.complete, by_subkind: r.by_subkind,
+    items: r.items.map(it => ({ name: it.name, path: it.path, line: it.start_line, kind: it.kind,
+      ...(it.kind === "FEATURE" ? { bullets: (it.attrs?.bullets || []).slice(0, 4) } : {}) })) }));
 
-  // PLANNED SQL -- one shot each, service-controlled. The model gets SQL's flexibility, not its rope.
   const sqlResults = [];
-  for (const stmt of (plan?.sql || []).filter(x => typeof x === "string" && /^\s*(with|select)\b/i.test(x)).slice(0, 2)) {
-    emit({ type: "status", text: "running a planned query" });
-    const r = await runSql({ sql: stmt });
+  for (const { stmt, r } of sqlRes) {
     if (r.error) { sqlResults.push({ sql: stmt, error: r.error }); continue; }
     for (const e of r.evidence) if (!seen.has(`ev:${e.id}`)) { seen.add(`ev:${e.id}`); emit({ type: "evidence", id: e.id, repo: e.repo, path: e.path, line: e.line, extractor: e.extractor }); }
-    sqlResults.push({ sql: r.sql, row_count: r.row_count, capped: r.capped, rows: r.rows.slice(0, 60).map(row => { const o = { ...row }; if (o.attrs) delete o.attrs; return o; }), evidence: r.evidence.slice(0, 40) });
+    sqlResults.push({ sql: r.sql, row_count: r.row_count, capped: r.capped, rows: r.rows.slice(0, 40).map(row => { const o = { ...row }; delete o.attrs; return o; }), evidence: r.evidence.slice(0, 30) });
   }
 
-  // ENDPOINT FAMILIES -- relationship lists: every caller + handler of a URL prefix
   const families = [];
-  for (const pref of (plan?.endpoint_families || []).slice(0, 3)) {
-    if (typeof pref !== "string" || !pref.startsWith("/")) continue;
-    emit({ type: "status", text: `mapping every endpoint under ${pref}` });
-    const fam = await endpointFamily({ path_prefix: pref, refs });
-    if (!fam.error) {
-      families.push(fam);
-      for (const e of fam.family) for (const c of e.callers)
-        if (!seen.has(`fam:${c.path}:${c.line}`)) { seen.add(`fam:${c.path}:${c.line}`);
-          emit({ type: "claim", id: `f${seen.size}`, text: `HTTP_CALL_SITE ${c.path}:${c.line} -> ${e.endpoint}`, kind: "HTTP_CALL_SITE",
-                 name: `${e.method} ${e.path}`, path: c.path, line: c.line, edge: "TARGETS", depth: 0, evidence_ids: [], confidence: 0.95 }); }
-    }
+  for (const fam of famRes) {
+    if (fam.error) continue;
+    families.push(fam);
+    for (const e of fam.family) for (const c of e.callers)
+      if (!seen.has(`fam:${c.path}:${c.line}`)) { seen.add(`fam:${c.path}:${c.line}`);
+        emit({ type: "claim", id: `f${seen.size}`, text: `HTTP_CALL_SITE ${c.path}:${c.line} -> ${e.endpoint}`, kind: "HTTP_CALL_SITE",
+               name: `${e.method} ${e.path}`, path: c.path, line: c.line, edge: "TARGETS", depth: 0, evidence_ids: [], confidence: 0.95 }); }
   }
 
-  // SOURCE ON DEMAND -- the graph is structure; the code is in git at the indexed commit.
-  // Read the anchors' bodies, ±15 lines around any defect, and grep the question's
-  // identifiers inside the anchor files. Bounded: the model never gets the repo.
+  // SOURCE ON DEMAND -- only when the question needs logic ("why", "how does it decide") or names an identifier.
   const source = [];
   let sourceChars = 0;
-  const SOURCE_CAP = 16000;
+  const SOURCE_CAP = 14000;
   const pushSrc = (blk) => { if (!blk || blk.error) return; const size = JSON.stringify(blk).length; if (sourceChars + size > SOURCE_CAP) return; source.push(blk); sourceChars += size; };
   const identTokens = candidates(question).filter(t => /[#.?!:_]|[a-z][A-Z]/.test(t)).slice(0, 5);
   if (plan?.want_source || identTokens.length) {
     emit({ type: "status", text: "reading source at the indexed commit" });
     const seenFiles = new Set();
-    for (const r of results) {
-      const a = r.anchor; if (!a?.path || !a.repo) continue;
+    await Promise.all(results.map(async (r) => {
+      const a = r.anchor; if (!a?.path || !a.repo) return;
       if (a.kind === "SYMBOL" || a.kind === "HANDLER" || a.kind === "HTTP_CALL_SITE") {
         const ent = await q(`select end_line from ckg.entities e join ckg.repos rp on rp.id=e.repo_id where rp.name=$1 and e.path=$2 and e.start_line=$3 limit 1`, [a.repo, a.path, a.line]);
         pushSrc(await readSource({ repo: a.repo, path: a.path, start_line: a.line || 1, end_line: ent[0]?.end_line || null, refs, context: 2 }));
@@ -683,30 +784,41 @@ async function planRun({ question, refs, emit, t0, p }) {
         }
       }
       for (const d of r.defects || []) if (d.path && d.line) pushSrc(await readSource({ repo: a.repo, path: d.path, start_line: Math.max(1, d.line - 12), end_line: d.line + 12, refs }));
-    }
+    }));
   }
 
-  // REPO-WIDE GREPS -- "every place that ..." for a concrete token
+  // REPO-WIDE GREPS -- only when the plan asked to read code; they are the slowest step.
   const greps = [];
-  const planGreps = (plan?.greps || []).filter(g => typeof g === "string" && g.length >= 3).slice(0, 3);
-  // Grep every repo the anchors touched -- and both frontends when the question says so.
-  // A backend-only grep is why "which frontend code stores the token" came back empty.
-  const grepRepos = new Set(results.map(r => r.anchor?.repo).filter(Boolean));
-  if (!grepRepos.size) grepRepos.add("procol-backend");
-  if (/\b(frontend|dashboard|react|redux|ui|browser|client)\b/i.test(question)) grepRepos.add("procol-client-dashboard");
-  for (const pat of planGreps) for (const repo of grepRepos) {
-    emit({ type: "status", text: `grep "${pat}" across ${repo} at the indexed commit` });
-    const g = await grepSource({ repo, pattern: pat, refs, max_hits: 30, context: 2 });
-    if (!g.error && g.total_hits) greps.push(g);
+  if (plan?.want_source) {
+    const planGreps = (plan?.greps || []).filter(g => typeof g === "string" && g.length >= 3).slice(0, 3);
+    const grepRepos = new Set(results.map(r => r.anchor?.repo).filter(Boolean));
+    if (!grepRepos.size) grepRepos.add("procol-backend");
+    if (/\b(frontend|dashboard|react|redux|ui|browser|client|screen)\b/i.test(question)) grepRepos.add("procol-client-dashboard");
+    const jobs = [];
+    for (const pat of planGreps) for (const repo of grepRepos) {
+      emit({ type: "status", text: `grep "${pat}" across ${repo}` });
+      jobs.push(grepSource({ repo, pattern: pat, refs, max_hits: 30, context: 2 }));
+    }
+    for (const g of await Promise.all(jobs)) if (!g.error && g.total_hits) greps.push(g);
   }
 
-  // OVERVIEW -- cached prose, when the question is "what does X do" shaped
+  // OVERVIEWS -- targeted: the features the anchors belong to (via IMPLEMENTS), features found by meaning,
+  // and the system summary for overview-shaped questions.
   let summaries;
-  if (plan?.want_summaries) {
+  const anchorIds = results.map(r => r.anchor?.id).filter(Boolean);
+  const semFeatureIds = sem.filter(m => m.kind === "FEATURE").map(m => Number(m.id));
+  if (plan?.want_summaries || isOverview(question) || semFeatureIds.length) {
     emit({ type: "status", text: "reading cached overviews" });
-    const s2 = await getSummaries({ refs, limit: 30 });
-    if (s2.length) summaries = s2.map(x => ({ altitude: x.altitude, subject: x.subject_key, headline: x.headline,
-                                              body: x.body, covers_entities: x.entity_count, by: x.generated_by }));
+    const rows = await q(
+      `with feats as (
+         select f.id from ckg.entities f where f.id = any($1::bigint[]) and f.kind = 'FEATURE'
+         union select g.src_entity_id from ckg.edges g where g.kind = 'IMPLEMENTS' and g.dst_entity_id = any($1::bigint[]))
+       select s.altitude, s.subject_key, s.headline, s.body, s.entity_count, s.generated_by, rp.name as repo
+         from ckg.summaries s join ckg.repos rp on rp.id = s.repo_id
+        where s.subject_id in (select id from feats) or (s.altitude = 'system' and $2::boolean)
+        order by s.altitude desc, s.entity_count desc limit 8`, [[...anchorIds, ...semFeatureIds], isOverview(question)]);
+    const rows2 = rows.length ? rows : (plan?.want_summaries ? await getSummaries({ refs, limit: 10 }) : []);
+    if (rows2.length) summaries = rows2.map(x => ({ altitude: x.altitude, subject: x.subject_key, repo: x.repo, headline: x.headline, body: x.body, covers_entities: x.entity_count }));
   }
 
   // OWNERS -- who to ask
@@ -719,31 +831,23 @@ async function planRun({ question, refs, emit, t0, p }) {
     if (o.length) owners = { scope: dir, people: o };
   }
 
-  const facts = { question, refs, approach: plan?.approach ?? null, lookups: results,
+  const facts = { question, refs, approach: plan?.approach ?? null,
+                  lookups: results.map(r => { const o = { ...r }; if (o.anchor) { const { id, ...rest } = o.anchor; o.anchor = rest; } return o; }),
                   ...(lists.length ? { lists } : {}), ...(sqlResults.length ? { planned_sql: sqlResults } : {}),
                   ...(families.length ? { endpoint_families: families } : {}),
                   ...(source.length ? { source } : {}), ...(greps.length ? { greps } : {}),
                   ...(summaries ? { overviews: summaries } : {}), ...(owners ? { owners } : {}) };
-  let factsJson = JSON.stringify(facts, null, 1);
-  if (factsJson.length > 60000) {                       // trim downstream lists before truncating blindly
-    for (const r of facts.lookups) { if (r.downstream) r.downstream = r.downstream.slice(0, 20); if (r.upstream_callers) r.upstream_callers = r.upstream_callers.slice(0, 8); }
-    factsJson = JSON.stringify(facts, null, 1).slice(0, 60000);
-  }
 
-  // Phase C: answer
+  // Phase C: answer (bounded payload, one retry)
+  emitContextPaths(JSON.stringify(facts), emit);
   emit({ type: "status", text: `writing the answer (${p.model})` });
-  let text = "";
-  try {
-    for await (const d of chatStream({ messages: [{ role: "system", content: ANSWER_SYSTEM },
-      { role: "user", content: `QUESTION: ${question}\n\nFACTS:\n${factsJson}` }], max_tokens: 1800, temperature: 0.1 })) {
-      text += d; emit({ type: "token", text: d });
-    }
-  } catch (e) { emit({ type: "error", code: "llm_failed", message: e.message }); }
-  if (!text) emit({ type: "token", text: "(No prose available - the language model call failed. The claims and evidence above come from the code graph and are unaffected.)" });
+  await writeAnswer({ question, facts, emit, budget: FACTS_BUDGET });
+  await emitRefsFooter(refs, emit);
 
   const summary = { type: "done", lists: lists.map(l => `${l.asked.kind}:${l.total}`),
                     families: families.map(f => `${f.prefix}:${f.endpoints}ep/${f.call_sites}cs`),
                     source_blocks: source.length, greps: greps.map(g => `${g.pattern}:${g.total_hits}`),
+                    candidates_by_meaning: sem.length,
                     claim_count: [...seen].filter(k => k.startsWith("n:")).length,
                     evidence_count: [...seen].filter(k => k.startsWith("ev:")).length, tool_calls: results.length * 3 + 1,
                     unresolved_count: results.reduce((a, r) => a + (r.unresolved?.length || 0), 0),

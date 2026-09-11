@@ -3,7 +3,7 @@
 // and checks the graph-derived facts against expectations an author would recognise.
 // Without a model configured it exercises the full retrieval path and reports prose as
 // "n/a" -- which is the point: facts first, narration second.
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 
 // Provider config is read at module load, and static imports are hoisted above this
 // line -- so set the env FIRST and import dynamically, or the run silently uses the mock.
@@ -12,18 +12,21 @@ process.env.LLM_MODE = process.env.LLM_MODE || "guided";
 const { ask } = await import("./service/agent.mjs");
 const { q, pool } = await import("./db.mjs");
 
-const questions = JSON.parse(readFileSync(new URL("../eval/questions.json", import.meta.url)));
+const only = process.env.EVAL_QIDS ? new Set(process.env.EVAL_QIDS.split(",")) : null;   // EVAL_QIDS=q5,q7 to re-run a few
+const questions = JSON.parse(readFileSync(new URL("../eval/questions.json", import.meta.url))).filter(t => !only || only.has(t.id));
+const OUT = new URL("../eval/out/last_run/", import.meta.url); mkdirSync(OUT, { recursive: true });
 const refs = (process.env.EVAL_REFS || "main").split(",");
 const rows = [];
 
 for (const t of questions) {
-  const ev = { claims: [], unresolved: [], evidence: {}, text: "", errors: [] };
+  const ev = { claims: [], unresolved: [], evidence: {}, text: "", errors: [], contextPaths: [] };
   await ask({ question: t.q, refs, emit: (e) => {
     if (e.type === "claim") ev.claims.push(e);
     else if (e.type === "unresolved") ev.unresolved.push(e);
     else if (e.type === "evidence") ev.evidence[e.id] = e;
     else if (e.type === "token") ev.text += e.text;
     else if (e.type === "error") ev.errors.push(e.code);
+    else if (e.type === "context_paths") ev.contextPaths.push(...e.paths);
   }});
 
   const ids = ev.claims.flatMap(c => c.evidence_ids);
@@ -70,13 +73,14 @@ for (const t of questions) {
     // 3. no invented file paths: every *.rb / *.js token in the prose must be one we supplied
     const claimed = prose.match(/[\w./-]+\.(rb|js|jsx)\b/g) || [];
     // everything the model was given: full paths, basenames, and the anchor's own file
-    const supplied = new Set([...fqns.map(r => r.path), ...Object.values(ev.evidence).map(e => e.path)]
+    const supplied = new Set([...fqns.map(r => r.path), ...Object.values(ev.evidence).map(e => e.path), ...ev.contextPaths]
       .filter(Boolean).flatMap(pth => [pth, pth.split("/").pop()]));
     proseChecks.push(["no-invented-paths", claimed.every(c => [...supplied].some(sp => sp.endsWith(c) || c.endsWith(sp)))]);
     // 4. names the refs it read
     proseChecks.push(["names-the-ref", refs.some(r => prose.includes(r))]);
   }
 
+  writeFileSync(new URL(`${t.id}.md`, OUT), `# ${t.id}: ${t.q}\n\nmode=${process.env.LLM_MODE} claims=${ev.claims.length} unresolved=${ev.unresolved.length}\n\n${ev.text}\n\n---\nprose checks: ${proseChecks.map(([n, ok]) => `${ok ? "✓" : "✗"} ${n}`).join("  ")}\n`);
   const pass = checks.every(([, ok]) => ok);
   const prosePass = proseChecks.length ? proseChecks.every(([, ok]) => ok) : null;
   rows.push({ id: t.id, pass, prosePass,
@@ -102,4 +106,5 @@ if (scored.length) {
   console.log("\nPROSE — not scored: no model configured. Set LLM_BASE_URL/LLM_MODEL/LLM_API_KEY to compare models.");
 }
 await pool.end();
+try { await (await import("./service/embed.mjs")).disposeEmbedder(); } catch {}
 process.exit(passed === rows.length && (!scored.length || prosePassed === scored.length) ? 0 : 1);

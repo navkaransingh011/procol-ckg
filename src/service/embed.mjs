@@ -51,4 +51,7 @@ export async function embed(texts, { isQuery = false } = {}) {
   return c.provider === "local" ? local(input) : remote(input);
 }
 
+/** Release the native ONNX session; without this, process.exit can abort with "mutex lock failed" on macOS. */
+export async function disposeEmbedder() { try { await pipe?.dispose?.(); } catch { /* already gone */ } pipe = null; }
+
 export const toPgVector = (v) => `[${v.map(x => Number(x).toFixed(7)).join(",")}]`;

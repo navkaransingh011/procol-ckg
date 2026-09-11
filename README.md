@@ -115,3 +115,25 @@ node --env-file=.env src/eval-planner-anchor.mjs   # planner vs semantic vs unio
 Provider is `EMBED_PROVIDER=local` (`@huggingface/transformers`, model cached in `~/.cache/procol-ckg-models`) or
 `openai` (any `/v1/embeddings`). Pilot result: name anchor 8/8 on named questions, 0/8 on plain ones; semantic 5/8
 plain in top-10; planner + semantic union 7/8. See `eval/out/anchor_pilot_*.md`.
+
+## Frontend (`fe/`)
+
+A standalone, minimal chat UI (Vite + React, no UI library). Not part of the client dashboard.
+
+```bash
+npm run fe:install        # once
+npm run fe:dev            # http://localhost:5173, proxies /api to the service on 8787
+npm run fe:build          # writes fe/dist; the service then serves it at http://127.0.0.1:8787/
+```
+
+In production the service serves `fe/dist` itself, so UI and API are one process and one origin.
+Set `CKG_HOST=0.0.0.0` only if no reverse proxy sits in front; the default binds to localhost.
+
+## Answer modes (`LLM_MODE`)
+
+| Mode | What happens | Use |
+|---|---|---|
+| `auto` (default) | Exact identifier + simple trace question → `guided`. Anything in plain words, or asking why/how/what-if → `plan`. | production |
+| `guided` | Service picks one anchor by name, traces, model narrates. Sub-second. Fails on plain-English questions. | fast path only |
+| `plan` | Model plans (with candidates found by meaning), service runs lookups/lists/SQL/families in parallel, reads source when needed, model writes. Bounded facts payload with one retry. | deep answers |
+| `sql` | Model writes read-only SQL itself. Expert mode. | engineers |

@@ -13,11 +13,17 @@
     "eval": "node --env-file=.env src/eval.mjs",
     "import:kb": "node --env-file=.env src/import-kb.mjs",
     "embed": "node --env-file=.env src/embed-index.mjs",
-    "eval:anchor": "node --env-file=.env src/eval-anchor.mjs"
+    "eval:anchor": "node --env-file=.env src/eval-anchor.mjs",
+    "fe:dev": "npm --prefix fe run dev",
+    "fe:build": "npm --prefix fe run build",
+    "fe:install": "npm --prefix fe install"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "pg": "^8.13.1"
+  },
+  "engines": {
+    "node": ">=20.6"
   }
 }

@@ -7,7 +7,7 @@ switching is **three environment variables and no code change**.
 
 Worth knowing before choosing, because it decides how much the provider's data terms matter.
 
-In `LLM_MODE=guided` (the default) the model receives **only the extracted JSON facts** —
+In `LLM_MODE=guided` (the fast path; `auto` is the default and routes to it only for exact identifiers) the model receives **only the extracted JSON facts** —
 node kinds, names, file paths, line numbers, the edge chain, and the gap list. Typically
 2–8 KB. It never receives source code, and the pipeline already excludes `.env`, `*.pem`,
 `*.key` and `id_rsa*` at the tree walk, so no credential can reach it.

@@ -32,12 +32,15 @@ function headers() {
 }
 
 /** One non-streaming round. Tool rounds don't need streaming; the final answer does. */
+const TIMEOUT_MS = () => Number(process.env.LLM_TIMEOUT_MS || 120000);
+
 export async function chat({ messages, tools, temperature = 0.1, max_tokens = 2000 }) {
   const { BASE, MODEL } = cfg();
   if (BASE === "mock") throw new Error("mock provider: use mockRound() instead");
   const res = await fetch(endpoint(), {
     method: "POST",
     headers: headers(),
+    signal: AbortSignal.timeout(TIMEOUT_MS()),
     body: JSON.stringify({
       model: MODEL, messages, temperature, max_tokens,
       ...(tools?.length ? { tools, tool_choice: "auto" } : {}),
@@ -58,6 +61,7 @@ export async function* chatStream({ messages, temperature = 0.1, max_tokens = 20
   const res = await fetch(endpoint(), {
     method: "POST",
     headers: headers(),
+    signal: AbortSignal.timeout(TIMEOUT_MS()),
     body: JSON.stringify({ model: MODEL, messages, temperature, max_tokens, stream: true }),
   });
   if (!res.ok) throw new Error(`LLM ${res.status}: ${(await res.text()).slice(0, 400)}`);

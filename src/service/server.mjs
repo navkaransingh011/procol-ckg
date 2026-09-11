@@ -2,12 +2,20 @@
 // The agent service. Implements docs/API_CONTRACT.md.
 // Node's built-in http server -- no framework, so there is nothing to keep updated.
 import { createServer } from "node:http";
+import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ask } from "./agent.mjs";
 import { provider } from "./llm.mjs";
 import { q, pool } from "../db.mjs";
 import { resolveScope } from "../tools.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
+const HOST = process.env.CKG_HOST || "127.0.0.1";
+// The standalone UI (fe/) is served from here when built, so production is one process, one origin.
+const STATIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../fe/dist");
+const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml",
+               ".png": "image/png", ".ico": "image/x-icon", ".json": "application/json", ".woff2": "font/woff2", ".map": "application/json" };
 const ORIGIN = process.env.CKG_ALLOWED_ORIGIN || "http://localhost:3000";
 // 'procol' verifies the bearer token against the platform. 'dev' accepts anything
 // and says so loudly -- never run 'dev' anywhere reachable from outside your machine.
@@ -129,12 +137,32 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname.startsWith("/api/")) return json(res, 404, { error: "not found" });
+
+  // static UI with SPA fallback; refuses anything that escapes fe/dist
+  if (req.method === "GET") {
+    const rel = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
+    const file = path.resolve(STATIC_DIR, rel);
+    if (!file.startsWith(STATIC_DIR)) return json(res, 403, { error: "forbidden" });
+    const serve = async (f) => {
+      const body = await readFile(f);
+      res.writeHead(200, { "content-type": MIME[path.extname(f)] || "application/octet-stream",
+                           "cache-control": f.endsWith("index.html") ? "no-cache" : "public, max-age=31536000, immutable" });
+      res.end(body);
+    };
+    try {
+      if ((await stat(file)).isFile()) return await serve(file);
+    } catch { /* fall through to SPA index */ }
+    try { return await serve(path.join(STATIC_DIR, "index.html")); }
+    catch { return json(res, 404, { error: "UI not built: run `npm run build` in fe/" }); }
+  }
+
   json(res, 404, { error: "not found" });
 });
 
-server.listen(PORT, "127.0.0.1", () => {
+server.listen(PORT, HOST, () => {
   const p = provider();
-  console.log(`ckg-agent on http://127.0.0.1:${PORT}`);
+  console.log(`ckg-agent on http://${HOST}:${PORT}`);
   console.log(`  provider  ${p.mock ? "mock (no model, no key)" : p.base + " · " + p.model}`);
   console.log(`  auth      ${AUTH_MODE}${AUTH_MODE === "dev" ? "  ← NOT AUTHENTICATED" : ""}`);
   console.log(`  cors      ${ORIGIN}`);
