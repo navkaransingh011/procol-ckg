@@ -7,7 +7,7 @@ const write = (k, v) => { try { localStorage.setItem(k, v); } catch { /* storage
 const newTurn = (question, refs) => ({
   id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
   question, refs, startedAt: Date.now(), status: "", steps: [], text: "", claims: [], evidence: {},
-  unresolved: [], truncated: null, error: null, summary: null, intent: null,
+  unresolved: [], truncated: null, error: null, summary: null, intent: null, tables: [],
 });
 
 export function useAgent() {
@@ -52,6 +52,7 @@ export function useAgent() {
         case "status": return { ...t, status: ev.text, steps: [...t.steps, ev.text] };
         case "token": return { ...t, text: t.text + ev.text };
         case "claim": return { ...t, claims: [...t.claims, ev] };
+        case "table": return { ...t, tables: [...(t.tables || []), ev] };
         case "evidence": return { ...t, evidence: { ...t.evidence, [ev.id]: ev } };
         case "unresolved": return { ...t, unresolved: [...t.unresolved, ev] };
         case "truncated": return { ...t, truncated: ev };

@@ -107,6 +107,7 @@ Read the stream with `fetch` + `ReadableStream` (as `api.js` does). Frames are `
 | `unresolved` | `{ fqn, path, line, reason }` | a call site whose URL is built at runtime. **A normal outcome, not an error.** Rendered as "Where the trail stops". Never red. |
 | `truncated` | `{ reason, at_depth }` | trace was bounded. Small note. |
 | `context_paths` | `{ paths: string[] }` | every file path the model was shown. Diagnostic; FE ignores today. |
+| `table` | `{ title, columns: string[], rows: string[][], total, complete, as_of, source }` | a COMPLETE result set from the live platform mirror (e.g. all 78 configs whose default is true). Render as a scrollable table under the answer with the title and "as of" time; the prose only summarises and says "see the table below". |
 | `token` | `{ text }` | answer prose. NOTE: arrives as ONE or a few large chunks, not word by word (§6). The service appends a final footer token: `"\n\nRead from main: procol-backend@1089000b · procol-client-dashboard@4005ff00 · web-bidding@7325f662"`. |
 | `error` | `{ code, message }` | `llm_failed`, `agent_failed`, `network` (set client-side). Facts already on screen stay valid. |
 | `done` | `{ claim_count, evidence_count, unresolved_count, refs, ms, mode: "guided"\|"plan", provider, timings?: { plan_ms, retrieve_ms, answer_ms }, lookups?, matched?, lists?, families?, source_blocks?, greps?, candidates_by_meaning? }` | end of stream. Receipt row uses claim_count, evidence_count, unresolved_count, refs, ms. |

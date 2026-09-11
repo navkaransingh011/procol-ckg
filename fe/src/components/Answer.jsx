@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import Markdown from "./Markdown.jsx";
 import Timeline from "./Timeline.jsx";
 import Trace from "./Trace.jsx";
+import DataTable from "./DataTable.jsx";
 
 export default function Answer({ turn, asking }) {
   const [copied, setCopied] = useState(false);
@@ -25,6 +26,9 @@ export default function Answer({ turn, asking }) {
         </div>
       )}
       {!turn.text && !asking && hasTrace && <p className="note">No prose came back, but the path below is read straight from the graph and stands on its own.</p>}
+
+      {/* Complete result sets from the live platform mirror: exact rows, the prose only summarises them. */}
+      {(turn.tables || []).map((t, i) => <DataTable key={`${t.source}-${i}`} table={t} />)}
 
       {simple && hasTrace ? (
         <details className="details" open={!turn.text}>

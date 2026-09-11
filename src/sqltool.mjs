@@ -1,6 +1,7 @@
 // Let the model write its own SQL -- against a read-only role, through a timeout, under a row
 // cap, with evidence auto-attached to any entity id it returns. The database enforces safety;
 // the checks here only produce clearer error messages than Postgres would.
+import { LIVE_DOC } from "./tools.mjs";
 import pg from "pg";
 import { getEvidence } from "./tools.mjs";
 
@@ -33,7 +34,11 @@ export async function runSql({ sql, note = null }) {
            evidence: ev.evidence.map(e => ({ id: e.id, repo: e.repo, path: e.path, line: e.start_line, kind: e.kind, extractor: e.extractor })) };
 }
 
-export const SCHEMA_DOC = `You query a PostgreSQL code-knowledge graph (schema "ckg") through three read-only views.
+export const SCHEMA_DOC = `
+LIVE PLATFORM DATA (read-only mirror of UAT, schema live.*; allowlisted columns only; jsonb columns filter with @>):
+${LIVE_DOC}
+Example: select config_key, name, defaults from live.master_configurations where defaults @> '{"value": true}' order by config_key;
+You query a PostgreSQL code-knowledge graph (schema "ckg") through three read-only views.
 Every query MUST be a single SELECT. Results are capped at 200 rows -- use WHERE, LIMIT, GROUP BY.
 
 v_nodes(id, repo, ref, tenant, kind, fqn, name, path, start_line, end_line, subkind, attrs jsonb, resolution, confidence, extractor)

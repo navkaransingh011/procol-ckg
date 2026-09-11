@@ -29,7 +29,8 @@ for (const t of questions) {
     else if (e.type === "context_paths") ev.contextPaths.push(...e.paths);
   }});
 
-  const ids = ev.claims.flatMap(c => c.evidence_ids);
+  // graph evidence ids are numeric; DOCUMENT claims carry string ids ("d219019") that point at doc evidence, not entities
+  const ids = ev.claims.flatMap(c => c.evidence_ids || []).map(Number).filter(Number.isInteger);
   const fqns = ids.length ? (await q(`select fqn, kind::text, path, attrs from ckg.entities where id = any($1::bigint[])`, [ids])) : [];
   const fqnSet = new Set(fqns.map(r => r.fqn));
   const kindSet = new Set(fqns.map(r => r.kind));

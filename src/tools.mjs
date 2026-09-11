@@ -519,7 +519,7 @@ export async function liveFreshness() {
  * Never joins arbitrary SQL; company lookups by name go through where/like on live.companies first.
  * Returns rows, the exact total, and as_of (when this table was last synced) -- answers must say both.
  */
-export async function queryLive({ table, where = {}, like = {}, columns = null, limit = 50, order_by = null }) {
+export async function queryLive({ table, where = {}, like = {}, contains = {}, not_null = [], columns = null, limit = 50, order_by = null }) {
   const spec = LIVE_TABLES[table];
   if (!spec) return { error: `not a live table: ${table}. Allowed: ${Object.keys(LIVE_TABLES).join(", ")}` };
   const cols = (columns && columns.length ? columns : spec.columns).filter(c => spec.columns.includes(c));
@@ -532,15 +532,52 @@ export async function queryLive({ table, where = {}, like = {}, columns = null, 
     else { params.push(String(v)); conds.push(`${lident(c)}::text = $${params.length}`); }
   }
   for (const [c, v] of Object.entries(like || {})) {
+    if (c === "any") {                                              // OR across several columns: {"any": {"columns": [...], "value": "lot"}}
+      const cols2 = (v?.columns || []).filter(x => spec.columns.includes(x));
+      if (!cols2.length) return { error: "like.any needs allowed columns" };
+      params.push(`%${String(v.value)}%`); conds.push(`(${cols2.map(x => `${lident(x)}::text ilike $${params.length}`).join(" or ")})`);
+      continue;
+    }
     if (!spec.columns.includes(c)) return { error: `column ${c} is not allowed on ${table}` };
     params.push(`%${String(v)}%`); conds.push(`${lident(c)}::text ilike $${params.length}`);
   }
+  // JSON-aware: contains = jsonb @> (e.g. {"defaults": {"value": true}}), not_null = column is not null
+  for (const [c, v] of Object.entries(arguments[0].contains || {})) {
+    if (!spec.columns.includes(c)) return { error: `column ${c} is not allowed on ${table}` };
+    params.push(JSON.stringify(v)); conds.push(`${lident(c)}::jsonb @> $${params.length}::jsonb`);
+  }
+  for (const c of arguments[0].not_null || []) { if (spec.columns.includes(c)) conds.push(`${lident(c)} is not null`); }
   const whereSql = conds.length ? `where ${conds.join(" and ")}` : "";
   const lim = Math.min(Math.max(1, Number(limit) || 50), 200);
   const ord = order_by && spec.columns.includes(order_by) ? `order by ${lident(order_by)} desc` : `order by ${lident(spec.cursor)} desc`;
   const [{ n }] = await q(`select count(*)::int n from live.${lident(table)} ${whereSql}`, params);
   const rows = await q(`select ${cols.map(lident).join(", ")}, synced_at from live.${lident(table)} ${whereSql} ${ord} limit ${lim}`, params);
   const [st] = await q(`select last_run from live.sync_state where table_name=$1`, [table]);
-  return { table, where, like, total: n, returned: rows.length, complete: n <= rows.length, as_of: st?.last_run ?? null, source: "UAT platform database (mirror)",
+  return { table, where, like, contains, total: n, returned: rows.length, complete: n <= rows.length, as_of: st?.last_run ?? null, source: "UAT platform database (mirror)",
            rows: rows.map(r => { const o = { ...r }; delete o.synced_at; for (const k of Object.keys(o)) if (typeof o[k] === "string" && o[k].length > 600) o[k] = o[k].slice(0, 600) + "…"; return o; }) };
+}
+
+
+/**
+ * search_configs -- find configuration switches by MEANING over key + human name + description + default,
+ * and say how many companies override each (and how many have it on). This is how "the lock that stops two
+ * flexi PO transactions running together" resolves to fx_response_sequence_advisory_lock_enabled.
+ */
+export async function searchConfigs({ question, k = 6, min_score = 0.4 }) {
+  const { embed, embedModelId, toPgVector } = await import("./service/embed.mjs");
+  const model = embedModelId();
+  const [v] = await embed([question], { isQuery: true });
+  const rows = await q(
+    `select ci.config_key, (1 - (ci.embedding <=> $1::vector))::float as score,
+            m.name, m.description, m.defaults, m.status, m.item_type,
+            (select count(*) from live.custom_configurations cc where cc.config_key = ci.config_key) as overrides,
+            (select count(*) from live.custom_configurations cc where cc.config_key = ci.config_key and cc.status = 1) as overrides_active,
+            (select count(distinct cc.company_id) from live.custom_configurations cc where cc.config_key = ci.config_key and cc.status = 1) as companies_active
+       from live.config_index ci
+       join lateral (select name, description, defaults, status, item_type from live.master_configurations m where m.config_key = ci.config_key order by company_id nulls first limit 1) m on true
+      where ci.model = $2
+      order by ci.embedding <=> $1::vector
+      limit $3`, [toPgVector(v), model, k]).catch(() => []);
+  const [st] = await q(`select last_run from live.sync_state where table_name='master_configurations'`).catch(() => [{}]);
+  return { model, as_of: st?.last_run ?? null, configs: rows.filter(r => Number(r.score) >= min_score).map(r => ({ ...r, score: Number(Number(r.score).toFixed(2)), overrides: Number(r.overrides), overrides_active: Number(r.overrides_active), companies_active: Number(r.companies_active) })) };
 }

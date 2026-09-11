@@ -99,6 +99,8 @@ async function pass() {
     try { out.push(await syncTable(name, spec)); }
     catch (e) { out.push({ name, error: String(e.message).slice(0, 200) }); await q(`insert into live.sync_state (table_name, last_run, last_error) values ($1, now(), $2) on conflict (table_name) do update set last_run=now(), last_error=excluded.last_error`, [name, String(e.message).slice(0, 500)]).catch(() => {}); }
   }
+  try { const ci = await refreshConfigIndex(); if (ci.embedded || ci.removed) out.push({ name: "config_index", changed: ci.embedded, removed: ci.removed, total: ci.indexed }); }
+  catch (e) { out.push({ name: "config_index", error: String(e.message).slice(0, 120) }); }
   const line = out.map(r => r.error ? `${r.name}: ERROR ${r.error}` : `${r.name}: ${r.changed} changed${r.removed ? `, ${r.removed} removed` : ""}, ${r.total} rows${r.full ? " (full)" : ""}`).join(" | ");
   console.log(`${new Date().toISOString()} live sync ${Date.now() - t0}ms  ${line}`);
   return out;
@@ -111,4 +113,35 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     await pass();
     if (!once) { for (;;) { await new Promise(r => setTimeout(r, INTERVAL)); await pass(); } }
   } finally { await src.end(); await pool.end(); }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// CONFIG SEMANTIC INDEX. The catalogue of switches (master_configurations) is searched by MEANING: a
+// question like "the lock so two flexi PO transactions cannot run together" must find
+// fx_response_sequence_advisory_lock_enabled ("Enable FxResponse Sequence Lock per Datasource") without
+// anyone guessing the key. Content-addressed by a hash of key+name+description, so only changed rows re-embed.
+// ---------------------------------------------------------------------------------------------------
+export async function refreshConfigIndex() {
+  const { embed, embedModelId, toPgVector } = await import("./service/embed.mjs");
+  const model = embedModelId();
+  await q(`create table if not exists live.config_index (
+             config_key text primary key, text text not null, hash text not null, model text, embedding vector, refreshed_at timestamptz default now())`);
+  await q(`grant select on live.config_index to ckg_reader`).catch(() => {});
+  const rows = await q(`select config_key, min(name) name, min(description) description, min(defaults::text) defaults
+                          from live.master_configurations where config_key is not null group by config_key`);
+  const want = rows.map(r => ({ key: r.config_key, text: `${r.config_key} — ${r.name || ""}. ${r.description || ""} Default: ${r.defaults || ""}`.replace(/\s+/g, " ").trim() }));
+  const have = new Map((await q(`select config_key, hash, model from live.config_index`)).map(r => [r.config_key, r]));
+  const { createHash } = await import("node:crypto");
+  const todo = want.filter(w => { const h = createHash("sha1").update(w.text).digest("hex"); w.hash = h; const e = have.get(w.key); return !e || e.hash !== h || e.model !== model; });
+  for (let i = 0; i < todo.length; i += 64) {
+    const b = todo.slice(i, i + 64);
+    const vecs = await embed(b.map(w => w.text));
+    for (let j = 0; j < b.length; j++)
+      await q(`insert into live.config_index (config_key, text, hash, model, embedding) values ($1,$2,$3,$4,$5::vector)
+               on conflict (config_key) do update set text=excluded.text, hash=excluded.hash, model=excluded.model, embedding=excluded.embedding, refreshed_at=now()`,
+              [b[j].key, b[j].text, b[j].hash, model, toPgVector(vecs[j])]);
+  }
+  const gone = [...have.keys()].filter(k => !want.some(w => w.key === k));
+  if (gone.length) await q(`delete from live.config_index where config_key = any($1::text[])`, [gone]);
+  return { indexed: want.length, embedded: todo.length, removed: gone.length };
 }

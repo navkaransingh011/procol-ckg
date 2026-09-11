@@ -315,3 +315,17 @@ kbd { font: 11px/1 var(--mono); padding: 3px 6px; border: 1px solid var(--line-2
   *, *::before, *::after { animation: none !important; transition: none !important; }
   .composer-spot { display: none; }
 }
+
+
+/* ---- live data tables: exact rows for "list all X", the model only summarises ---- */
+.dtable { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow: hidden; }
+.dtable-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.dtable-title { font-weight: 600; font-size: 13.5px; }
+.dtable-meta { color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; flex: 1; }
+.dtable-filter { border: 1px solid var(--line); background: transparent; color: var(--ink); border-radius: 8px; padding: 4px 8px; font: inherit; font-size: 12.5px; width: 140px; }
+.dtable-scroll { overflow: auto; max-height: 420px; }
+.dtable table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+.dtable th { position: sticky; top: 0; background: var(--surface); text-align: left; font-weight: 600; color: var(--ink-2); padding: 6px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.dtable td { padding: 6px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 12px; }
+.dtable td:nth-child(2) { font-family: var(--sans); }
+.dtable tr:last-child td { border-bottom: 0; }

@@ -183,7 +183,7 @@ length). The minutes users saw came from the model gateway, which answers the sa
 | `LLM_FALLBACK_FIRST_BYTE_MS` / `LLM_FALLBACK_REASONING_EFFORT` / `LLM_FALLBACK_MAX_TOKENS` | 30 s / `minimal` / up to 8000 | LUNA reasons at length and its reasoning tokens count against `max_tokens`: at 1500 it returned no text in 6 of 8 probes. The fallback gets a patient deadline, minimal effort, and 3x the primary's budget |
 | `LLM_BREAKER_MS` | 3 min | after one primary stall, hedge immediately (t=0) for this long; auto-recovers |
 | `LLM_TIMEOUT_MS` / `LLM_ATTEMPTS` | 90 s / 3 | hard cap per attempt / attempts in total |
-| `LLM_REASONING_EFFORT` | `low` in `.env` | FAST_SMALLER is a reasoning model: it thinks silently before writing. Default effort took 33 s and could spend the whole `max_tokens` on thinking (empty answer). `low` answered the same request in 1.6 s. Reasoning tokens count against `max_tokens`, so budgets are sized for both. |
+| `LLM_REASONING_EFFORT` | `medium` in `.env` (planner stays `minimal`) | FAST_SMALLER is a reasoning model: it thinks silently before writing. Default effort took 33 s and could spend the whole `max_tokens` on thinking (empty answer). `low` answered the same request in 1.6 s. Reasoning tokens count against `max_tokens`, so budgets are sized for both. |
 | `CKG_ANSWER_CACHE` | on | `ckg.answer_cache`: same question + style + commits replays in ~0 ms; `fresh: true` bypasses |
 
 Every call streams, and the race is decided on the first **content** token: an empty completion
@@ -220,7 +220,13 @@ schema `live` of our own Postgres, so answers can join **what the docs intend**,
   restart. Polling reaches the same freshness within a minute and keeps sensitive columns from ever leaving.
 - `query_live` is the only door: one allowlisted table, equality/substring filters, 200-row cap, exact total,
   `as_of` timestamp. The planner may chain `"company_id": "$companies.id"` to resolve a company by name first.
-- Any `config_key` that comes back is grepped in the backend so the answer can say where the code reads it.
+- **Configuration switches are found by meaning.** `live.config_index` embeds every switch's key + human name +
+  description + default (502 today, refreshed by the poller, content-addressed). A question like "the lock so two
+  flexi PO transactions cannot run together" resolves to `fx_response_sequence_advisory_lock_enabled` without
+  anyone guessing the key; the planner receives these CANDIDATE CONFIGS before it plans. Set questions use JSON
+  filters (`contains: {"defaults": {"value": true}}`), and the SQL step knows the live schema.
+- Any `config_key` that comes back (candidate or row) is grepped in the backend, with context, so the answer
+  can say where the code reads it and what it does there.
 - `.env` needs `LIVE_DATABASE_URL` (a UAT connection; use `sslmode=no-verify`, the cert is self-signed) and
   optionally `LIVE_SYNC_INTERVAL_S`. **Ask for a read-only UAT role**: the `developer` login can write.
 

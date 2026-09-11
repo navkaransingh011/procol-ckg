@@ -3,7 +3,7 @@
 // The model's job here is small and bounded: pick tools, then write prose over
 // structured results it cannot edit. It never sees source code and never invents
 // a fact. Everything it can cite came from a deterministic extractor.
-import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, semanticAnchor, searchDocs, queryLive, LIVE_DOC, NARRATIVE_EDGES } from "../tools.mjs";
+import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, semanticAnchor, searchDocs, queryLive, searchConfigs, LIVE_DOC, NARRATIVE_EDGES } from "../tools.mjs";
 import { q } from "../db.mjs";
 import { createHash } from "node:crypto";
 import { runSql, SCHEMA_DOC } from "../sqltool.mjs";
@@ -523,7 +523,8 @@ Given a question, output ONLY a JSON object -- no prose, no markdown fences:
 {"lookups": [{"q": "<one specific identifier>"}],
  "lists":   [{"kind": "<ENTITY_KIND>", "path_prefix": "<optional dir>", "name_contains": "<optional>", "subkind": "<optional, see note>"}],
  "sql": ["<one read-only SELECT against v_nodes / v_edges when no lookup shape above fits; optional>"],
- "live": [{"table": "<one of the live tables below>", "where": {"<col>": "<exact value>"}, "like": {"<col>": "<substring>"}, "limit": 50}],
+ "live": [{"table": "<one of the live tables below>", "where": {"<col>": "<exact value>"}, "like": {"<col>": "<substring>"},
+           "contains": {"<jsonb col>": {"value": true}}, "not_null": ["<col>"], "limit": 50}],
  "endpoint_families": ["<URL path prefix, e.g. /approval_workflow/approval_requests>"],
  "greps": ["<exact code token to find every occurrence of, e.g. self.mcp? or token_type>"],
  "want_source": <true if answering needs the actual code: any "why", "how does it decide", "what does it check",
@@ -538,6 +539,13 @@ Use "live" (max 3) when the question asks what is ON or OFF, enabled, configured
 templates have something, or the CURRENT state of configuration -- that is data in the platform database, not code.
 Live tables (a read-only mirror of UAT, allowlisted columns only):
 ${LIVE_DOC}
+Set questions over configuration are LIVE queries with JSON filters, not lookups: "which configs default to true" ->
+{"table":"master_configurations","contains":{"defaults":{"value":true}},"limit":50}; "who has X on" ->
+{"table":"custom_configurations","where":{"config_key":"X","status":"1"}}. like.any searches several columns at once:
+{"table":"master_configurations","like":{"any":{"columns":["config_key","name","description"],"value":"lot"}}}.
+For "all / every / which ones / how many / list" questions set "limit": 200 so the whole set comes back (it is shown to
+the user as a table); otherwise keep limit <= 50.
+If CANDIDATE CONFIGS are given, query THOSE keys (where config_key = the key) -- never a guessed substring.
 Patterns: a company by name -> {"table":"companies","like":{"name":"reliance"}}; a switch by key ->
 {"table":"master_configurations","like":{"config_key":"three_way"}} then {"table":"custom_configurations","like":{"config_key":"three_way"}};
 approvals for a company -> TWO entries: {"table":"companies","like":{"name":"reliance"}} and
@@ -627,8 +635,16 @@ LIVE PLATFORM DATA -- the CURRENT configuration, from a read-only mirror of the 
   not production). "total" is exact; if "complete" is false say "showing N of M".
 - status columns: 1 = active/on, 0 = inactive/off, unless the facts say otherwise. custom_configurations
   overrides master_configurations for that company/template; the "modifications" column holds the override value.
+- If a live entry has "full_table_shown_to_user": true, the user already sees the COMPLETE table of those rows next to
+  your answer -- ALL "rows_shown_to_user" rows, not the sample of "rows_in_this_view" you were given. Never say the
+  table shows fewer rows than "total"; the sample is for you, not the reader. Do not enumerate; give the exact total,
+  describe what is in the table (groups, notable rows, patterns), and say "see the table below".
 - "live_config_greps" show where the CODE reads a config_key that came back from live data -- this is the join
   between configuration and behaviour. Use it: "X is on for <company> (as of ...), and the code checks it in <file:line>".
+- "config_candidates" are the configuration switches closest IN MEANING to the question (key, human name, description,
+  default, how many companies have an override on). When the question asks "which config / what is the setting for X",
+  answer with the top candidate by key AND human name, its default, who has it on, and where the code reads it
+  (live_config_greps). If the top two are close, name both and say which fits better and why. Never invent a key.
 - Three sources, three roles: documents = the intended rule; code = how it is enforced; live = who has it on now.
   Keep them distinct in the answer, and never present live state as the rule or the rule as the state.
 
@@ -705,6 +721,12 @@ WRITE LIKE THIS
   Name the document by its title (and section) so they can open it.
 - "live" rows are the current configuration on UAT (not production) as of the time shown: who has what switched
   on, which templates and approval flows exist. Say the time and "on UAT". Status 1 means on, 0 off.
+- If a live entry has "full_table_shown_to_user": true, the person can already see the complete table of ALL those
+  rows under your answer (every one of "total"; the rows you were given are only a sample). Give the exact count,
+  describe what is in it in a few sentences, then say "see the table below". Never claim the table shows fewer rows.
+- "config_candidates" are the switches closest in meaning to what was asked. When asked which setting does X,
+  name the best one by its key and its plain name, say its default and how many companies have it on, and
+  where in the code it is checked. Never invent a key that is not in the facts.
 - Describe the flow as a short story: the person does X on a screen, the system checks Y, then Z happens,
   and the result is stored so it can be shown later.
 - 4 to 8 sentences, then optionally a short "In the code" line naming 1-3 real files for an engineer who
@@ -853,7 +875,7 @@ function shrink(facts, budget) {
     () => { for (const l of facts.lists || []) l.items = l.items.slice(0, 15); },
     () => { for (const r of facts.lookups) { if (r.downstream) r.downstream = r.downstream.slice(0, 12); if (r.upstream_callers) r.upstream_callers = r.upstream_callers.slice(0, 6); } },
     () => { for (const f of facts.endpoint_families || []) f.family = (f.family || []).slice(0, 12).map(e => ({ ...e, callers: (e.callers || []).slice(0, 6) })); },
-    () => { for (const l of facts.live || []) if (l.rows) l.rows = l.rows.slice(0, 15); },
+    () => { for (const l of facts.live || []) if (l.rows) l.rows = l.rows.slice(0, 12); },
     () => { if (facts.documents) facts.documents = facts.documents.slice(0, 3).map(d => ({ ...d, text: d.text.slice(0, 900) })); },
     () => { if (facts.source) facts.source = facts.source.slice(0, 2); },
     () => { delete facts.greps; },
@@ -901,7 +923,8 @@ async function runLivePlan(specs) {
   const list = (specs || []).filter(x => x && typeof x.table === "string").slice(0, 4);
   const refRe = /^\$([a-z_]+)\.([a-z_]+)$/;
   const dependsOn = (x) => Object.values(x.where || {}).map(v => typeof v === "string" && v.match(refRe)).filter(Boolean);
-  const run = (x) => queryLive({ table: x.table, where: x.where || {}, like: x.like || {}, limit: Math.min(Number(x.limit) || 50, 50) }).catch(e => ({ error: e.message, table: x.table }));
+  const run = (x) => queryLive({ table: x.table, where: x.where || {}, like: x.like || {}, contains: x.contains || {}, not_null: Array.isArray(x.not_null) ? x.not_null : [],
+                                 limit: Math.min(Number(x.limit) || 50, 200) }).catch(e => ({ error: e.message, table: x.table }));
   const first = list.filter(x => !dependsOn(x).length), second = list.filter(x => dependsOn(x).length);
   const results = await Promise.all(first.map(run));
   const byTable = new Map(first.map((x, i) => [x.table, results[i]]));
@@ -921,15 +944,36 @@ async function runLivePlan(specs) {
   return results;
 }
 
+/** "List all X" must mean all: if a set question came back incomplete but the whole set fits, fetch it whole. */
+async function completeSets(question, results) {
+  if (!/\b(all|every|which|how many|list|each)\b/i.test(question)) return results;
+  return Promise.all(results.map(async (r) => {
+    if (!r || r.error || r.complete || !r.total || r.total > 200) return r;
+    const full = await queryLive({ table: r.table, where: r.where || {}, like: r.like || {}, contains: r.contains || {}, limit: 200 }).catch(() => null);
+    return full && !full.error ? full : r;
+  }));
+}
+
 async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
   // Phase 0: candidates by MEANING. Fails soft when no embeddings exist. The pilot measured this as the
   // difference between 5/8 and 7/8 on questions asked in everyday words.
   let sem = [];
   try { sem = (await semanticAnchor({ question, k: 8, refs })).matches.filter(m => Number(m.score) >= 0.55); } catch { /* no embeddings for this model */ }
-  const candText = sem.length
+  // Configuration questions: find the switch by MEANING over the live catalogue before planning, so the
+  // planner works from real keys ("fx_response_sequence_advisory_lock_enabled") instead of guessing substrings.
+  const CONFIG_RE = /\b(config(uration)?s?|setting|switch|flag|toggle|enabled?|disabled?|turn(ed)? (on|off)|lock|master config|custom config|default value|feature (on|off))\b/i;
+  let configs = [];
+  if (CONFIG_RE.test(question)) {
+    try { configs = (await searchConfigs({ question, k: 6, min_score: 0.55 })).configs; } catch { /* no live mirror */ }
+    if (configs.length) emit({ type: "status", text: `configuration switches by meaning: ${configs.slice(0, 3).map(c => c.config_key).join(" · ")}` });
+  }
+  const candText = (sem.length
     ? "\n\nCANDIDATE NODES (real graph names ranked by meaning; use their exact names as lookups when they fit):\n"
       + sem.map(m => `- ${m.kind} | ${m.name || m.fqn} | ${m.path || ""}`).join("\n")
-    : "";
+    : "") + (configs.length
+    ? "\n\nCANDIDATE CONFIGS (real config_keys from the live catalogue, ranked by meaning -- use these exact keys in live where{} filters; do not guess substrings):\n"
+      + configs.map(c => `- ${c.config_key} | "${c.name || ""}" | default ${JSON.stringify(c.defaults)} | on for ${c.companies_active} companies`).join("\n")
+    : "");
 
   // Phase A: plan
   const tPlan = Date.now();
@@ -973,12 +1017,26 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
     runLivePlan(plan?.live),                                                   // what is switched ON right now (UAT mirror)
   ]);
   const documents = docRes;
-  const live = liveRes.filter(Boolean);
+  const live = await completeSets(question, liveRes.filter(Boolean));
   for (const l of live) emit({ type: "status", text: l.error ? `live data: ${l.error}` : `live platform data: ${l.table} — ${l.total} row${l.total === 1 ? "" : "s"}${l.complete ? "" : ` (showing ${l.returned})`}, as of ${l.as_of ? new Date(l.as_of).toISOString().slice(11, 16) + " UTC" : "unknown"}` });
+  // A list is DATA, not prose. Any live result with more than a handful of rows is shown to the user as an exact
+  // table (all rows, as of the sync time); the model gets a compact projection and is told to summarise, not enumerate.
+  const cell = (v) => v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v).slice(0, 80) : String(v).slice(0, 120);
+  const PREFER = ["config_key", "name", "key", "title", "description", "defaults", "status", "company_id", "approval_key", "template_type", "item_type", "updated_at"];
+  for (const l of live) {
+    if (l.error || !l.rows?.length || l.rows.length <= 5) continue;
+    const cols = [...PREFER.filter(c => c in l.rows[0]), ...Object.keys(l.rows[0]).filter(c => !PREFER.includes(c))].slice(0, 8);
+    emit({ type: "table", title: `${l.table}${Object.keys(l.like || {}).length || Object.keys(l.where || {}).length || Object.keys(l.contains || {}).length ? " (filtered)" : ""} — ${l.total} row${l.total === 1 ? "" : "s"} on UAT`,
+           columns: cols, rows: l.rows.map(r => cols.map(c => cell(r[c]))), total: l.total, complete: l.complete, as_of: l.as_of, source: l.table });
+    l.full_table_shown_to_user = true;
+    l.rows_shown_to_user = l.rows.length;                 // the user's table has EVERY returned row
+    l.rows_in_this_view = Math.min(40, l.rows.length);    // the model sees a sample; it must not quote this number
+    l.rows = l.rows.slice(0, 40).map(r => Object.fromEntries(cols.slice(0, 5).map(c => [c, cell(r[c])])));   // compact view for the model
+  }
   // three-way join: any config_key that came back from live data -> where the CODE reads it (repo-wide grep)
-  const liveKeys = [...new Set(live.flatMap(l => (l.rows || []).map(r => r.config_key).filter(Boolean)))].slice(0, 3);
+  const liveKeys = [...new Set([...configs.slice(0, 2).map(c => c.config_key), ...live.flatMap(l => (l.rows || []).map(r => r.config_key).filter(Boolean))])].slice(0, 3);
   const liveGreps = [];
-  for (const k of liveKeys) { const g = await grepSource({ repo: "procol-backend", pattern: k, refs, max_hits: 12, context: 1 }).catch(() => null); if (g && !g.error && g.total_hits) liveGreps.push(g); }
+  for (const k of liveKeys) { const g = await grepSource({ repo: "procol-backend", pattern: k, refs, max_hits: 10, context: 4 }).catch(() => null); if (g && !g.error && g.total_hits) liveGreps.push(g); }
   if (liveGreps.length) emit({ type: "status", text: `where the code reads ${liveKeys.join(", ")}: ${liveGreps.reduce((a, g) => a + g.total_hits, 0)} places` });
   const matched = results.filter(r => r.match !== "none").length;
   emit({ type: "status", text: `${matched}/${results.length} lookups matched a node` });
@@ -1081,6 +1139,8 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
                   ...(source.length ? { source } : {}), ...(greps.length ? { greps } : {}),
                   ...(documents.length ? { documents } : {}),
                   ...(live.length ? { live } : {}), ...(liveGreps.length ? { live_config_greps: liveGreps } : {}),
+                  ...(configs.length ? { config_candidates: configs.map(c => ({ config_key: c.config_key, name: c.name, description: c.description, default: c.defaults, item_type: c.item_type,
+                                                                              overrides: c.overrides, companies_with_it_on: c.companies_active, match_score: c.score })) } : {}),
                   ...(summaries ? { overviews: summaries } : {}), ...(owners ? { owners } : {}) };
 
   // Phase C: answer (bounded payload, one retry)

@@ -71,7 +71,7 @@ export default function App() {
         {!live && (
           <div className="hero">
             <h1>Ask the codebase.</h1>
-            <p>Every answer names the file and line that NAVKARAN</p>
+            <p>Every answer names the file and line that proves it, and says so when it cannot tell.</p>
           </div>
         )}
 

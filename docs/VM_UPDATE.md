@@ -19,7 +19,7 @@ npm run fe:install && npm run fe:build
 ## 2. Update `.env` (add these lines; keep the existing ones)
 ```
 LLM_FALLBACK_MODEL=HACK26_GPT_5_6_LUNA
-LLM_REASONING_EFFORT=low
+LLM_REASONING_EFFORT=medium
 LIVE_DATABASE_URL=postgresql://<uat_user>:<uat_password>@35.200.252.20:5432/agribid-uat-latest?sslmode=no-verify
 LIVE_SYNC_INTERVAL_S=60
 ```
