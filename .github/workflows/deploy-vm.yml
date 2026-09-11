@@ -8,6 +8,8 @@
 #   var     GCP_PROJECT         procol-xxxx
 #   var     VM_NAME             procol-ckg
 #   var     VM_ZONE             asia-south1-c
+#   var     VM_REPO_DIR         /home/<repo-owner>/procol-ckg (absolute; $HOME resolves to the
+#                               OS-Login deployer account, not the repo owner, over this SSH hop)
 name: Deploy to VM
 
 on:
@@ -44,13 +46,15 @@ jobs:
 
       # The VM pulls this exact commit and rebuilds. --tunnel-through-iap means port 22
       # never has to be open to the internet.
+      # $HOME here is the OS-Login-provisioned home for the deployer service account, not
+      # the repo owner's -- CKG_REPO_DIR pins vm-deploy.sh to where the repo actually lives.
       - name: Deploy over IAP
         run: |
           gcloud compute ssh "${{ vars.VM_NAME }}" \
             --zone "${{ vars.VM_ZONE }}" \
             --tunnel-through-iap \
             --quiet \
-            --command "bash \$HOME/procol-ckg/deploy/vm-deploy.sh ${{ github.sha }}"
+            --command "CKG_REPO_DIR=${{ vars.VM_REPO_DIR }} bash ${{ vars.VM_REPO_DIR }}/deploy/vm-deploy.sh ${{ github.sha }}"
 
       - name: Report
         if: always()
