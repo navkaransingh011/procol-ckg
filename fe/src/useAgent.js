@@ -4,13 +4,14 @@ import { askStream, getHealth, getRefs } from "./api.js";
 const newTurn = (question, refs) => ({
   id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
   question, refs, status: "", steps: [], text: "", claims: [], evidence: {},
-  unresolved: [], truncated: null, error: null, summary: null,
+  unresolved: [], truncated: null, error: null, summary: null, intent: null,
 });
 
 export function useAgent() {
   const [health, setHealth] = useState(null);
   const [refs, setRefs] = useState([]);
   const [selectedRef, setSelectedRef] = useState("main");
+  const [style, setStyle] = useState("auto");
   const [turns, setTurns] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [asking, setAsking] = useState(false);
@@ -35,6 +36,7 @@ export function useAgent() {
   const handleEvent = useCallback((ev) => {
     patchLast((t) => {
       switch (ev.type) {
+        case "intent": return { ...t, intent: ev.intent };
         case "status": return { ...t, status: ev.text, steps: [...t.steps, ev.text].slice(-6) };
         case "token": return { ...t, text: t.text + ev.text };
         case "claim": return { ...t, claims: [...t.claims, ev] };
@@ -58,13 +60,13 @@ export function useAgent() {
     setActiveId(turn.id);
     setAsking(true);
     abortRef.current = askStream({
-      question: q, refs: [selectedRef], onEvent: handleEvent,
+      question: q, refs: [selectedRef], style, onEvent: handleEvent,
       onError: (err) => {
         patchLast((t) => ({ ...t, status: "", error: { code: "network", message: err.message } }));
         setAsking(false);
       },
     });
-  }, [asking, selectedRef, handleEvent, patchLast]);
+  }, [asking, selectedRef, style, handleEvent, patchLast]);
 
   const stop = useCallback(() => {
     abortRef.current?.();
@@ -80,5 +82,5 @@ export function useAgent() {
   }, []);
 
   const active = turns.find((t) => t.id === activeId) || turns[turns.length - 1] || null;
-  return { health, refs, selectedRef, setSelectedRef, turns, active, select: setActiveId, asking, ask, stop, reset };
+  return { health, refs, selectedRef, setSelectedRef, style, setStyle, turns, active, select: setActiveId, asking, ask, stop, reset };
 }

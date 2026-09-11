@@ -72,18 +72,20 @@ const HANDLERS = { find_entity: findEntity, trace_from: traceFrom, get_evidence:
  * Runs one question. `emit(event)` receives the contract's typed events.
  * Returns a summary once done.
  */
-export async function ask({ question, refs = ["main"], emit }) {
+export async function ask({ question, refs = ["main"], emit, style = "auto" }) {
   const t0 = Date.now();
   const p = provider();
   const collectedEvidence = new Map();
   const collectedUnresolved = [];
   let toolCallCount = 0;
+  const intent = resolveIntent(question, style);           // 'simple' | 'code'
+  emit({ type: "intent", intent, chosen: style });
 
   if (p.mock) return mockRun({ question, refs, emit, t0 });
   if (mode() === "sql") return sqlRun({ question, refs, emit, t0, p });
-  if (mode() === "auto") return routeAuto({ question, refs, emit, t0, p });
-  if (mode() === "plan") return planRun({ question, refs, emit, t0, p });
-  if (mode() === "guided") return guidedRun({ question, refs, emit, t0, p });
+  if (mode() === "auto") return routeAuto({ question, refs, emit, t0, p, intent });
+  if (mode() === "plan") return planRun({ question, refs, emit, t0, p, intent });
+  if (mode() === "guided") return guidedRun({ question, refs, emit, t0, p, intent });
 
   const messages = [
     { role: "system", content: SYSTEM },
@@ -268,7 +270,7 @@ export async function anchor(question, refs) {
  * because the gaps are computed here and emitted before it is asked anything.
  * The model's only job is turning structured facts into a readable paragraph.
  */
-async function guidedRun({ question, refs, emit, t0, p }) {
+async function guidedRun({ question, refs, emit, t0, p, intent = "code" }) {
   emit({ type: "status", text: "searching the code graph" });
 
   // 1. anchor
@@ -387,11 +389,14 @@ STRICT RULES
 FACTS
 ${JSON.stringify(facts, null, 1).slice(0, 12000)}`;
 
-  emit({ type: "status", text: `writing the answer (${p.model})` });
+  emit({ type: "status", text: `writing the ${intent === "simple" ? "plain-English" : ""} answer (${p.model})`.replace("  ", " ") });
+  const guidedSystem = intent === "simple"
+    ? "You explain software to a non-engineer in plain, warm English. Use ONLY the JSON facts. Lead with what the user does and what happens. Prefer product words over code words. 3-5 sentences, then an optional short 'In the code' line naming real files from the facts. Invent nothing; if the facts fall short, say so."
+    : SYSTEM;
   let text = "";
   try {
     for await (const delta of chatStream({
-      messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }],
+      messages: [{ role: "system", content: guidedSystem }, { role: "user", content: prompt }],
       max_tokens: 700,
     })) { text += delta; emit({ type: "token", text: delta }); }
 
@@ -438,10 +443,8 @@ frontend HTTP call sites (by file path, e.g. "src/redux/orders/api.js"), externa
 and execution-confirmed defects. It does NOT contain method bodies or comments.
 
 Given a question, output ONLY a JSON object -- no prose, no markdown fences:
-{"approach": "<one sentence: how you will answer>",
- "lookups": [{"q": "<one specific identifier>", "why": "<what this lookup should reveal>"}],
- "lists":   [{"kind": "<ENTITY_KIND>", "path_prefix": "<optional dir>", "name_contains": "<optional>",
-              "subkind": "<optional, see note>", "why": "<what set this enumerates>"}],
+{"lookups": [{"q": "<one specific identifier>"}],
+ "lists":   [{"kind": "<ENTITY_KIND>", "path_prefix": "<optional dir>", "name_contains": "<optional>", "subkind": "<optional, see note>"}],
  "sql": ["<one read-only SELECT against v_nodes / v_edges when no lookup shape above fits; optional>"],
  "endpoint_families": ["<URL path prefix, e.g. /approval_workflow/approval_requests>"],
  "greps": ["<exact code token to find every occurrence of, e.g. self.mcp? or token_type>"],
@@ -478,7 +481,7 @@ Rules for lookups (max 8):
 - For frontend code, use the file path fragment, e.g. "src/redux/orders/api.js".
 - For cross-repo questions include BOTH ends: the frontend file or route AND the backend handler/method.
 - If the question names a bug or behaviour, look up the method most likely to contain it.
-- Order lookups by importance.
+- Order lookups by importance. Be terse: no explanations, no "why" fields, no prose -- the JSON only.
 - If CANDIDATE NODES are provided with the question, they are real graph names ranked by meaning. Prefer them
   as lookups when they fit the question; add your own only for what they miss.
 - Lists must be specific: a path_prefix needs at least two segments (app/services/awarding, src/redux/approvals),
@@ -570,6 +573,31 @@ OVERVIEW QUESTIONS ("how does X work", "what is X", "explain X")
   "truncated is false", "no hubs were skipped", "the match was exact". Mention a gap only when it changes
   the answer, and only in section 5.`;
 
+const ANSWER_SIMPLE_SYSTEM = `You explain how Procol's software works to a NON-ENGINEER -- a customer success
+or product person. You are given FACTS as JSON pulled from a verified code knowledge graph. You know nothing
+about this product except those facts.
+
+WRITE LIKE THIS
+- Plain, warm, direct English. Short sentences. No jargon. Explain any unavoidable term in a few words.
+- Lead with what a USER can do and what happens for them, step by step in plain language.
+- Prefer product words (an approval, a bid, a supplier, a screen) over code words (controller, endpoint, model).
+- Use the "overviews" facts first when present -- they are written for this audience. Then add specifics.
+- Describe the flow as a short story: the person does X on a screen, the system checks Y, then Z happens,
+  and the result is stored so it can be shown later.
+- 4 to 8 sentences, then optionally a short "In the code" line naming 1-3 real files for an engineer who
+  wants to look, taken ONLY from the facts. No headings, no numbered sections, no evidence tables.
+
+HARD RULES -- these keep it honest
+- Use ONLY the facts. Never invent a feature, screen, file, number, or behaviour. If the facts do not cover
+  part of the question, say plainly "the graph does not show that part" and stop -- do not fill it from
+  general knowledge of how such software usually works.
+- If the main match is approximate (match: "approximate"), open with "The closest thing I found is <name>,
+  which may not be exactly what you asked about," then explain that.
+- If nothing matched (match: "none" everywhere), say you could not find it in the indexed code and suggest
+  rephrasing with a feature or screen name. Do not guess.
+- Every file you name in the optional "In the code" line must appear in the facts.
+- Do NOT narrate the machinery: never write "the anchor", "unresolved", "truncated", "hops", "the trace".`;
+
 function extractJson(text) {
   const a = text.indexOf("{"), b = text.lastIndexOf("}");
   if (a === -1 || b === -1) return null;
@@ -624,6 +652,22 @@ async function lookupOne(qstr, refs, emit, seen) {
 
 // ---- routing: exact identifier + simple trace question -> guided (sub-second);
 // anything asked in plain words, or asking why/how/what-if -> plan (deep).
+// ---- intent: does the asker want CODE (files, lines, traces) or a PLAIN explanation?
+// Everyone at Procol uses this -- CS and PM ask "how does X work", engineers ask "who calls Y".
+// Default leans to plain unless the question is clearly technical; the UI can force either.
+const CODE_SIGNALS = /\b(trace|call(s|ers|ed)?|method|function|endpoint|route|controller|handler|table|column|schema|query|sql|migration|defect|bug|stack|guard|param|serializer|worker|job|class|module|which file|file:line|line number|implementation|code)\b/i;
+const SIMPLE_SIGNALS = /\b(how does|how do|what is|what are|what can|explain|overview|walk me through|in simple|for a (pm|cs|non|beginner)|as a user|business|feature|workflow|process|end to end|high level|non-technical)\b/i;
+const HAS_IDENTIFIER = /[\/#.:]|[a-z][A-Z]|_\w/;
+export function resolveIntent(question, style) {
+  if (style === "code" || style === "simple") return style;   // explicit UI toggle wins
+  const q = question || "";
+  const code = CODE_SIGNALS.test(q) || (HAS_IDENTIFIER.test(q) && !SIMPLE_SIGNALS.test(q));
+  const simple = SIMPLE_SIGNALS.test(q);
+  if (simple && !HAS_IDENTIFIER.test(q)) return "simple";     // plain words, plain answer
+  if (code) return "code";
+  return "simple";                                            // default audience is everyone
+}
+
 const OVERVIEW_RE = /\b(how does|how do|how is|how are|what is|what are|what does|explain|overview|walk me through|works?)\b/i;
 const THOUGHT_RE = /\b(why|what if|guard|check|decide|should|impact|every|all|which|who|owns?|built)\b/i;
 const IDENTIFIER_RE = /[\/#.:_]|[a-z][A-Z]/;
@@ -636,19 +680,38 @@ async function emitRefsFooter(refs, emit) {
   emit({ type: "token", text: `\n\nRead from ${refs.join(", ")}: ${parts.join(" · ")}` });
 }
 
+/**
+ * Remove any file path the model names that was not in the facts it was given. A weak model still
+ * writes "likely app/models/bid.rb" about half the time no matter what the prompt says; this makes
+ * "zero invented paths" a property of the service. Returns the cleaned text and how many were cut.
+ */
+function sanitizePaths(text, knownPaths) {
+  const known = [...knownPaths].filter(Boolean);
+  const bases = new Set(known.map(k => k.split("/").pop()));
+  let removed = 0;
+  const out = text.replace(/`?((?:[\w.-]+\/)+[\w.-]+\.(?:rb|js|jsx|ts|tsx|erb|yml|rake))(:\d+(?:-\d+)?)?`?/g, (m, pth) => {
+    const ok = known.some(k => k === pth || k.endsWith("/" + pth) || pth.endsWith("/" + k)) || bases.has(pth.split("/").pop());
+    if (ok) return m;
+    removed++;
+    return "a file the graph did not supply";
+  });
+  return { text: out, removed };
+}
+const pathsIn = (json) => new Set((json.match(/[\w./-]+\.(?:rb|js|jsx|ts|tsx|yml|erb|rake)\b/g) || []).filter(x => x.includes("/")));
+
 /** Every file path the model was shown, so a checker can tell "invented" from "given in a list". */
 function emitContextPaths(factsJson, emit) {
   const paths = new Set((factsJson.match(/[\w./-]+\.(?:rb|js|jsx|ts|tsx|yml|erb)\b/g) || []).filter(x => x.includes("/")));
   if (paths.size) emit({ type: "context_paths", paths: [...paths].slice(0, 400) });
 }
 
-async function routeAuto({ question, refs, emit, t0, p }) {
+async function routeAuto({ question, refs, emit, t0, p, intent }) {
   const a = await anchor(question, refs);
-  // A plain English word that happens to equal a class name ("workflows" -> module Workflows) is NOT an exact
-  // anchor. Only identifier-shaped tokens (paths, Class#method, snake_case, CamelCase) qualify for the fast path.
   const exactIdent = !!a.seed && !a.weak && IDENTIFIER_RE.test(a.token || "");
-  if (exactIdent && !isOverview(question) && !THOUGHT_RE.test(question)) return guidedRun({ question, refs, emit, t0, p });
-  return planRun({ question, refs, emit, t0, p });
+  // Fast path only for a code-intent, exact-identifier, non-"why" question.
+  if (intent === "code" && exactIdent && !isOverview(question) && !THOUGHT_RE.test(question))
+    return guidedRun({ question, refs, emit, t0, p, intent });
+  return planRun({ question, refs, emit, t0, p, intent });
 }
 
 const PLAN_LOOKUPS = 6, PLAN_TOTAL_LOOKUPS = 8, PLAN_LISTS = 3, LIST_LIMIT = 40, FACTS_BUDGET = 30000;
@@ -674,25 +737,31 @@ function shrink(facts, budget) {
   return json.length > budget ? json.slice(0, budget) : json;
 }
 
-/** Stream the answer; if the model call fails, retry once with half the facts, non-streaming. */
-async function writeAnswer({ question, facts, emit, budget }) {
+/** Get the answer (one retry with half the facts), strip any path not in the facts, emit it once. */
+async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYSTEM }) {
+  const known = pathsIn(JSON.stringify(facts));
   let text = "";
-  const run = async (json, stream) => {
-    const messages = [{ role: "system", content: ANSWER_SYSTEM }, { role: "user", content: `QUESTION: ${question}\n\nFACTS:\n${json}` }];
-    if (stream) { for await (const d of chatStream({ messages, max_tokens: 1800, temperature: 0.1 })) { text += d; emit({ type: "token", text: d }); } }
-    else { const m = await chat({ messages, max_tokens: 1800, temperature: 0.1 }); text = m.content || ""; if (text) emit({ type: "token", text }); }
+  const run = async (json) => {
+    const messages = [{ role: "system", content: system }, { role: "user", content: `QUESTION: ${question}\n\nFACTS:\n${json}` }];
+    let t = "";
+    for await (const d of chatStream({ messages, max_tokens: 1800, temperature: 0 })) t += d;
+    if (!t) t = (await chat({ messages, max_tokens: 1800, temperature: 0 })).content || "";
+    return t;
   };
-  try { await run(shrink(structuredClone(facts), budget), true); }
+  try { text = await run(shrink(structuredClone(facts), budget)); }
   catch (e) { emit({ type: "status", text: `answer failed (${String(e.message).slice(0, 80)}); retrying with fewer facts` }); }
   if (!text) {
-    try { await run(shrink(structuredClone(facts), Math.floor(budget / 2)), false); }
+    try { text = await run(shrink(structuredClone(facts), Math.floor(budget / 2))); }
     catch (e) { emit({ type: "error", code: "llm_failed", message: e.message }); }
   }
-  if (!text) emit({ type: "token", text: "(No prose available - the language model call failed twice. The claims and evidence above come from the code graph and are unaffected.)" });
-  return text;
+  if (!text) { emit({ type: "token", text: "(No prose available - the language model call failed twice. The claims and evidence above come from the code graph and are unaffected.)" }); return ""; }
+  const clean = sanitizePaths(text, known);
+  emit({ type: "token", text: clean.text });
+  if (clean.removed) emit({ type: "status", text: `removed ${clean.removed} file path${clean.removed > 1 ? "s" : ""} the model guessed but was not given` });
+  return clean.text;
 }
 
-async function planRun({ question, refs, emit, t0, p }) {
+async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
   // Phase 0: candidates by MEANING. Fails soft when no embeddings exist. The pilot measured this as the
   // difference between 5/8 and 7/8 on questions asked in everyday words.
   let sem = [];
@@ -703,10 +772,11 @@ async function planRun({ question, refs, emit, t0, p }) {
     : "";
 
   // Phase A: plan
+  const tPlan = Date.now();
   emit({ type: "status", text: `planning (${p.model})${sem.length ? ` with ${sem.length} candidates by meaning` : ""}` });
   let plan = null;
   try {
-    const m = await chat({ messages: [{ role: "system", content: PLAN_SYSTEM }, { role: "user", content: `QUESTION: ${question}${candText}` }], max_tokens: 600, temperature: 0 });
+    const m = await chat({ messages: [{ role: "system", content: PLAN_SYSTEM }, { role: "user", content: `QUESTION: ${question}${candText}` }], max_tokens: 320, temperature: 0 });
     plan = extractJson(m.content || "");
   } catch (e) { emit({ type: "status", text: `planner failed (${String(e.message).slice(0, 60)}); using identifiers and candidates` }); }
 
@@ -717,9 +787,11 @@ async function planRun({ question, refs, emit, t0, p }) {
   for (const m of sem.filter(m => Number(m.score) >= 0.62).slice(0, 2)) add(m.name || m.fqn);   // union with meaning
   for (const c of candidates(question).filter(t => IDENTIFIER_RE.test(t))) add(c);            // identifiers only, never plain words
   if (!lookups.length) for (const m of sem.slice(0, 3)) add(m.name || m.fqn);
+  const planMs = Date.now() - tPlan;
   emit({ type: "status", text: `looking up: ${lookups.join(" · ")}` });
 
   // Phase B: retrieve -- everything independent runs at once
+  const tRetrieve = Date.now();
   const seen = new Set();
   const specs = (plan?.lists || []).slice(0, PLAN_LISTS).filter(spec => {
     if (!spec?.kind) return false;
@@ -831,7 +903,7 @@ async function planRun({ question, refs, emit, t0, p }) {
     if (o.length) owners = { scope: dir, people: o };
   }
 
-  const facts = { question, refs, approach: plan?.approach ?? null,
+  const facts = { question, refs,
                   lookups: results.map(r => { const o = { ...r }; if (o.anchor) { const { id, ...rest } = o.anchor; o.anchor = rest; } return o; }),
                   ...(lists.length ? { lists } : {}), ...(sqlResults.length ? { planned_sql: sqlResults } : {}),
                   ...(families.length ? { endpoint_families: families } : {}),
@@ -839,9 +911,12 @@ async function planRun({ question, refs, emit, t0, p }) {
                   ...(summaries ? { overviews: summaries } : {}), ...(owners ? { owners } : {}) };
 
   // Phase C: answer (bounded payload, one retry)
+  const retrieveMs = Date.now() - tRetrieve;
   emitContextPaths(JSON.stringify(facts), emit);
-  emit({ type: "status", text: `writing the answer (${p.model})` });
-  await writeAnswer({ question, facts, emit, budget: FACTS_BUDGET });
+  emit({ type: "status", text: `writing the ${intent === "simple" ? "plain-English" : "technical"} answer (${p.model})` });
+  const tAnswer = Date.now();
+  await writeAnswer({ question, facts, emit, budget: FACTS_BUDGET, system: intent === "simple" ? ANSWER_SIMPLE_SYSTEM : ANSWER_SYSTEM });
+  const answerMs = Date.now() - tAnswer;
   await emitRefsFooter(refs, emit);
 
   const summary = { type: "done", lists: lists.map(l => `${l.asked.kind}:${l.total}`),
@@ -851,6 +926,7 @@ async function planRun({ question, refs, emit, t0, p }) {
                     claim_count: [...seen].filter(k => k.startsWith("n:")).length,
                     evidence_count: [...seen].filter(k => k.startsWith("ev:")).length, tool_calls: results.length * 3 + 1,
                     unresolved_count: results.reduce((a, r) => a + (r.unresolved?.length || 0), 0),
+                    timings: { plan_ms: planMs, retrieve_ms: retrieveMs, answer_ms: answerMs },
                     lookups, matched, refs, provider: `${p.base} · ${p.model}`, mode: "plan", ms: Date.now() - t0 };
   emit(summary);
   return summary;

@@ -8,7 +8,6 @@
 //   3. the model selects only the columns it thinks it needs, detaching provenance
 //      so nobody can check the answer.
 import { q, hex } from "./db.mjs";
-import { execFileSync } from "node:child_process";
 import path from "node:path";
 
 // Traversing all 17 edge kinds from a component reaches half the codebase through
@@ -378,11 +377,20 @@ export async function endpointFamily({ path_prefix, method = null, refs = ["main
 // ---------------------------------------------------------------------------------
 const SECRET_PATHS = /(^|\/)(\.env|\.env\..*|.*\.pem|id_rsa.*|.*\.key|.*\.p12|.*\.jks)$/;
 const MAX_LINES = 120;
-const repoDir = (name) => process.env[`CKG_REPO_DIR_${name.toUpperCase().replace(/-/g, "_")}`] || path.resolve(process.cwd(), "..", name);
 
 async function commitFor(repo, refs) {
   const { refs: rows } = await resolveScope(refs);
   return rows.find(r => r.repo === repo)?.sha ?? null;
+}
+
+/** File text at the indexed commit, from the database. No clone, no git. */
+async function fileText(repo, p, sha) {
+  const rows = await q(
+    `select bt.text from ckg.commit_files cf
+       join ckg.repos rp on rp.id = cf.repo_id
+       join ckg.blob_text bt on bt.blob_sha = cf.blob_sha
+      where rp.name = $1 and cf.path = $2 and cf.commit_sha = decode($3,'hex') limit 1`, [repo, p, sha]);
+  return rows[0]?.text ?? null;
 }
 
 export async function readSource({ repo, path: p, start_line = 1, end_line = null, refs = ["main"], context = 0 }) {
@@ -390,12 +398,8 @@ export async function readSource({ repo, path: p, start_line = 1, end_line = nul
   if (SECRET_PATHS.test(p)) return { error: "refused: secret path" };
   const sha = await commitFor(repo, refs);
   if (!sha) return { error: `no indexed commit for ${repo}@${refs}` };
-  const known = await q(`select 1 from ckg.entities e join ckg.repos rp on rp.id=e.repo_id
-                          where rp.name=$1 and e.path=$2 and encode(e.commit_sha,'hex')=$3 limit 1`, [repo, p, sha]);
-  if (!known.length) return { error: `refused: ${p} is not a path the graph knows at ${sha.slice(0, 8)}` };
-  let text;
-  try { text = execFileSync("git", ["-C", repoDir(repo), "show", `${sha}:${p}`], { encoding: "utf8", maxBuffer: 32e6 }); }
-  catch (e) { return { error: `git show failed: ${String(e.message).split("\n")[0]}` }; }
+  const text = await fileText(repo, p, sha);
+  if (text === null) return { error: `${p} is not a source file the graph holds at ${sha.slice(0, 8)}` };
   const lines = text.split("\n");
   const from = Math.max(1, (start_line || 1) - context);
   const to = Math.min(lines.length, (end_line || Math.min(lines.length, from + 59)) + context, from + MAX_LINES - 1);
@@ -404,37 +408,36 @@ export async function readSource({ repo, path: p, start_line = 1, end_line = nul
            lines: lines.slice(from - 1, to).map((l, i) => `${String(from + i).padStart(5)}  ${l}`) };
 }
 
-// Bounded, commit-pinned, fixed-string grep. Answers "where else does this appear?" --
-// e.g. every `return if self.mcp?` -- without giving the model the repo.
+// Bounded, commit-pinned, fixed-string search over the stored source. Answers "where else does
+// this appear?" -- e.g. every `return if self.mcp?` -- without giving the model the repo.
 export async function grepSource({ repo, pattern, refs = ["main"], paths = ["app", "lib", "src", "config"], max_hits = 40, context = 2 }) {
   if (!repo || !pattern || pattern.length < 3) return { error: "repo and a pattern of 3+ chars required" };
   const sha = await commitFor(repo, refs);
   if (!sha) return { error: `no indexed commit for ${repo}` };
-  let out = "";
-  try {
-    out = execFileSync("git", ["-C", repoDir(repo), "grep", "-n", "-I", "-F", "-e", pattern, sha, "--", ...paths],
-                       { encoding: "utf8", maxBuffer: 32e6 });
-  } catch (e) { if (e.status !== 1) return { error: `git grep failed: ${String(e.message).split("\n")[0]}` }; }
-  const hits = [];
-  for (const line of out.split("\n")) {
-    if (!line) continue;
-    // "<sha>:<path>:<line>:<text>"
-    const m = line.match(/^[0-9a-f]+:([^:]+):(\d+):(.*)$/);
-    if (!m || SECRET_PATHS.test(m[1])) continue;
-    hits.push({ path: m[1], line: Number(m[2]), text: m[3].trim().slice(0, 200) });
-    if (hits.length >= max_hits) break;
-  }
-  // group by file, add a little context around each hit
-  const byFile = new Map();
-  for (const h of hits) { if (!byFile.has(h.path)) byFile.set(h.path, []); byFile.get(h.path).push(h); }
+  const prefixes = (paths || []).map(d => `${String(d).replace(/\/$/, "")}/%`);
+  const rows = await q(
+    `select cf.path, bt.text from ckg.commit_files cf
+       join ckg.repos rp on rp.id = cf.repo_id
+       join ckg.blob_text bt on bt.blob_sha = cf.blob_sha
+      where rp.name = $1 and cf.commit_sha = decode($2,'hex')
+        and ($3::text[] = '{}' or cf.path like any($3::text[]))
+        and position($4 in bt.text) > 0
+      order by cf.path limit 200`, [repo, sha, prefixes, pattern]);
   const files = [];
-  for (const [p, hs] of byFile) {
-    let src = null;
-    try { src = execFileSync("git", ["-C", repoDir(repo), "show", `${sha}:${p}`], { encoding: "utf8", maxBuffer: 32e6 }).split("\n"); } catch { /* skip context */ }
-    files.push({ path: p, hits: hs.map(h => ({ line: h.line, text: h.text,
-      context: src ? src.slice(Math.max(0, h.line - 1 - context), h.line + context).map((l, i) => `${String(h.line - context + i).padStart(5)}  ${l}`) : undefined })) });
+  let total = 0;
+  outer: for (const r of rows) {
+    if (SECRET_PATHS.test(r.path)) continue;
+    const src = r.text.split("\n");
+    const hits = [];
+    for (let i = 0; i < src.length; i++) {
+      if (!src[i].includes(pattern)) continue;
+      hits.push({ line: i + 1, text: src[i].trim().slice(0, 200),
+                  context: src.slice(Math.max(0, i - context), i + 1 + context).map((l, j) => `${String(Math.max(1, i + 1 - context) + j).padStart(5)}  ${l}`) });
+      if (++total >= max_hits) { files.push({ path: r.path, hits }); break outer; }
+    }
+    if (hits.length) files.push({ path: r.path, hits });
   }
-  return { repo, pattern, commit: sha.slice(0, 10), total_hits: hits.length, capped: hits.length >= max_hits, files };
+  return { repo, pattern, commit: sha.slice(0, 10), total_hits: total, capped: total >= max_hits, files };
 }
 
 /**

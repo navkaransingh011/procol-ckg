@@ -107,4 +107,6 @@ if (scored.length) {
 }
 await pool.end();
 try { await (await import("./service/embed.mjs")).disposeEmbedder(); } catch {}
-process.exit(passed === rows.length && (!scored.length || prosePassed === scored.length) ? 0 : 1);
+// exitCode, not process.exit(): a hard exit while the ONNX runtime's threads are alive aborts with
+// "mutex lock failed" on macOS. Letting the loop drain exits cleanly with the same code.
+process.exitCode = passed === rows.length && (!scored.length || prosePassed === scored.length) ? 0 : 1;

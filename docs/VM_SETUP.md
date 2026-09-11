@@ -72,8 +72,88 @@ rm ~/ckg.sql.gz
 
 From this point the VM's database is the source of truth. Never load a laptop dump over it again.
 
-## 9. Running the UI + service on the VM (after the repo is cloned)
+## 9. Running the service + UI on the VM
+
+Pull the latest code first (the laptop must have committed and pushed it).
+
+```
+cd ~/procol-ckg && git pull
+```
+
+### 9.1 Runtime
+```
+sudo apt install -y git ruby
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs
+node -v      # must be 20.6 or newer
+```
+Ruby is only used by the indexer (Rails route expansion), not by the service.
+
+### 9.2 Install and build
 ```
 cd ~/procol-ckg && npm install && npm run fe:install && npm run fe:build
-npm run serve            # UI and API on http://127.0.0.1:8787 ; put nginx/Caddy with TLS in front
 ```
+
+### 9.3 Source code lives in the database
+READ and GREP read `ckg.blob_text` from Postgres, so the **service needs no clones**. Clones are only
+needed by the INDEXER (step 10), and only of the commit being indexed. Skip this for a service-only VM.
+
+### 9.4 Secrets
+`~/procol-ckg/.env`, then `chmod 600 .env`:
+```
+CKG_DATABASE_URL=postgres://ckg:OWNER_PASSWORD@localhost/ckg
+CKG_READER_URL=postgres://ckg_reader:READER_PASSWORD@localhost/ckg
+LLM_BASE_URL=http://slingring.procol.tech/v1
+LLM_MODEL=FAST_SMALLER
+LLM_API_KEY=<the PROJECT key, not a personal one>
+LLM_MODE=auto
+EMBED_PROVIDER=local
+EMBED_MODEL=Xenova/bge-small-en-v1.5
+EMBED_DIMS=384
+PORT=8787
+CKG_HOST=127.0.0.1
+```
+Then re-apply the read-only role settings that a dump does not carry:
+```
+psql "postgres://ckg:OWNER_PASSWORD@localhost/ckg" -f sql/007_reader_role_and_views.sql
+```
+
+### 9.5 Prove it
+```
+curl -s -m 10 http://slingring.procol.tech/v1/models -H "Authorization: Bearer $LLM_API_KEY"   # must list models: the VM can reach Slingring
+npm test                                                                                       # 17 tests
+npm run serve &  sleep 2;  curl -s http://127.0.0.1:8787/api/health;  kill %1
+```
+
+### 9.6 Run it permanently (systemd)
+`sudo tee /etc/systemd/system/ckg.service` with:
+```
+[Unit]
+Description=Procol Code Graph agent
+After=network.target postgresql.service
+
+[Service]
+User=YOUR_LINUX_USER
+WorkingDirectory=/home/YOUR_LINUX_USER/procol-ckg
+ExecStart=/usr/bin/node --env-file=.env src/service/server.mjs
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+then
+```
+sudo systemctl daemon-reload && sudo systemctl enable --now ckg
+sudo systemctl status ckg --no-pager
+journalctl -u ckg -f
+```
+
+### 9.7 Reach it
+Quick and safe, no open ports: from a laptop with gcloud,
+```
+gcloud compute ssh procol-ckg --zone asia-south1-c -- -N -L 8787:127.0.0.1:8787
+```
+then open http://localhost:8787 on the laptop.
+For the team: put Caddy or nginx with TLS on a Procol subdomain in front of 127.0.0.1:8787 and restrict
+port 443 to office IPs or Identity-Aware Proxy. The service is still in dev auth mode; do not expose it
+publicly until the verify endpoint exists.

@@ -21,14 +21,14 @@ export const getRefs = async () => {
 };
 
 /** Streams typed events; returns an abort function. */
-export const askStream = ({ question, refs, onEvent, onError }) => {
+export const askStream = ({ question, refs, style, onEvent, onError }) => {
   const controller = new AbortController();
   (async () => {
     try {
       const res = await fetch(`${BASE}/api/ask`, {
         method: "POST",
         headers: { "content-type": "application/json", ...authHeader() },
-        body: JSON.stringify({ question, refs }),
+        body: JSON.stringify({ question, refs, style }),
         signal: controller.signal,
       });
       if (!res.ok) {

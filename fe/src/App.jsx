@@ -20,6 +20,13 @@ export default function App() {
       <header className="top">
         <span className="brand"><span className="brand-mark" aria-hidden="true" />Code Graph</span>
         <div className="top-right">
+          <div className="seg" role="tablist" aria-label="Answer style">
+            {[["auto", "Auto"], ["simple", "Simple"], ["code", "Code"]].map(([v, label]) => (
+              <button key={v} type="button" role="tab" aria-selected={g.style === v}
+                className={`seg-btn${g.style === v ? " seg-btn--on" : ""}`}
+                onClick={() => g.setStyle(v)} disabled={g.asking}>{label}</button>
+            ))}
+          </div>
           {refNames.length > 1 && (
             <label className="refpick">
               <span className="ref-dot" aria-hidden="true" />
@@ -67,7 +74,10 @@ export default function App() {
 
         {live && g.active && (
           <section className="turn">
-            <div className="asked">{g.active.question}</div>
+            <div className="asked">
+              {g.active.question}
+              {g.active.intent && <span className={`tag tag--${g.active.intent}`}>{g.active.intent === "simple" ? "plain answer" : "technical answer"}</span>}
+            </div>
             <Answer turn={g.active} />
           </section>
         )}

@@ -22,6 +22,35 @@ import { normalizeEndpoint } from "./normalize.mjs";
 
 const EXTRACTORS = [feHttp, beRoutes, beSchema, beExternal];
 const SECRET_PATHS = /(^|\/)(\.env|\.env\..*|.*\.pem|id_rsa.*|.*\.key|.*\.p12)$/;
+// What gets its TEXT stored (so the agent can read and grep it without a clone).
+const SOURCE_DIRS = /^(app|lib|config|db|src|spec|test)\//;
+const SOURCE_EXT = /\.(rb|rake|erb|jbuilder|haml|slim|js|jsx|ts|tsx|mjs|cjs|json|ya?ml|less|css|scss|sql|md)$/;
+
+/** Store file text for blobs not yet kept. Content-addressed: a blob is stored once, ever. */
+async function storeBlobText(repoDir, files) {
+  const uniq = [...new Set(files.map((f) => f.blobSha))];
+  if (!uniq.length) return 0;
+  const have = new Set((await q(`select encode(blob_sha,'hex') h from ckg.blob_text where blob_sha = any($1::bytea[])`,
+                                [uniq.map(hex)])).map((r) => r.h));
+  const misses = uniq.filter((s) => !have.has(s));
+  let stored = 0;
+  for (let i = 0; i < misses.length; i += 300) {
+    const batch = misses.slice(i, i + 300);
+    const contents = await readBlobs(repoDir, batch);
+    const rows = [];
+    for (const sha of batch) {
+      const buf = contents.get(sha);
+      if (!buf || buf.includes(0)) continue;                       // binary: skip
+      const text = buf.toString("utf8");
+      rows.push([hex(sha), text, text.split("\n").length]);
+    }
+    if (!rows.length) continue;
+    const values = rows.map((_, j) => `($${j * 3 + 1}, $${j * 3 + 2}, $${j * 3 + 3})`).join(",");
+    await q(`insert into ckg.blob_text (blob_sha, text, lines) values ${values} on conflict (blob_sha) do nothing`, rows.flat());
+    stored += rows.length;
+  }
+  return stored;
+}
 const MAX_BLOB_BYTES = 512 * 1024;
 
 const argv = process.argv.slice(2);
@@ -43,6 +72,19 @@ async function main() {
   const commit = await resolveRef(repoDir, ref);
 
   const repoId = await upsertRepo("procol", repoName, repoName.includes("backend") ? "monolith" : "spa");
+  // A ref currently pointing at an imported (kb-import) commit holds data no extractor can reproduce
+  // -- runtime edges, defects, summaries, embeddings. Re-pointing it to local HEAD would drop all of
+  // that silently. Refuse unless --force. (Once the dump is re-generated from CI this guard is moot.)
+  const refName0 = (asRef || ref).replace(/^origin\//, "");
+  const cur = await one(`select encode(h.commit_sha,'hex') sha from ckg.ref_history h
+                          where h.repo_id=$1 and h.ref_name=$2 order by last_seen desc limit 1`, [repoId, refName0]).catch(() => null);
+  if (cur && cur.sha !== commit.sha && !argv.includes("--force")) {
+    const [imp] = await q(`select count(*)::int n from ckg.entities where repo_id=$1 and commit_sha=decode($2,'hex') and extractor like 'kb-import%'`, [repoId, cur.sha]);
+    if (imp.n > 0) {
+      console.error(`refusing: ${repoName}@${refName0} points at imported commit ${cur.sha.slice(0,8)} (${imp.n} imported entities). Re-index would drop them. Pass --force to override.`);
+      process.exit(3);
+    }
+  }
   await upsertCommit(repoId, commit.sha, commit.committedAt, commit.subject, null);
   await touchRef(repoId, (asRef || ref).replace(/^origin\//, ""), commit.sha, tenant, env);
 
@@ -57,8 +99,14 @@ async function main() {
     .filter((f) => f.sizeBytes <= MAX_BLOB_BYTES);
 
   const relevant = tree.filter((f) => EXTRACTORS.some((e) => e.handles(f.path)));
-  await registerBlobs(relevant.map((f) => ({ ...f, lang: path.extname(f.path).slice(1) })));
-  await recordCommitFiles(repoId, commit.sha, relevant);
+  // Source text kept in the database: everything READ/GREP may need, not only what extractors parse.
+  const sourceFiles = tree.filter((f) => SOURCE_DIRS.test(f.path) && SOURCE_EXT.test(f.path));
+  const tracked = [...new Map([...relevant, ...sourceFiles].map((f) => [f.path, f])).values()];
+  await registerBlobs(tracked.map((f) => ({ ...f, lang: path.extname(f.path).slice(1) })));
+  await recordCommitFiles(repoId, commit.sha, tracked);
+  const textStored = await storeBlobText(repoDir, sourceFiles);
+
+  if (textStored) console.log(`source text stored for ${textStored} new blobs (${sourceFiles.length} files in tree)`);
 
   // ---------- PHASE 1: per-blob, cache-gated ----------
   let parsed = 0, cached = 0;

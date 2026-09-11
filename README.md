@@ -129,6 +129,19 @@ npm run fe:build          # writes fe/dist; the service then serves it at http:/
 In production the service serves `fe/dist` itself, so UI and API are one process and one origin.
 Set `CKG_HOST=0.0.0.0` only if no reverse proxy sits in front; the default binds to localhost.
 
+## Self-contained database
+
+The indexer stores the text of every source file it sees (`ckg.blob_text`, content-addressed), so READ
+and GREP run as database queries. The answering service needs **no git clones** -- restore the dump and it
+works. Only the indexer needs a clone, and only of the commit being indexed. (~21 MB of text for the three repos.)
+
+## Answer style (`style` per request, or the UI toggle)
+
+Every `/api/ask` accepts `style`: `auto` (default), `simple`, or `code`. `auto` reads the question:
+plain wording ("how does X work", "what can a supplier do") gets a warm, non-technical explanation; an
+identifier or a code verb ("who calls X", "columns of the bids table") gets the engineer answer with
+file:line evidence. The UI has an Auto / Simple / Code toggle that forces it.
+
 ## Answer modes (`LLM_MODE`)
 
 | Mode | What happens | Use |

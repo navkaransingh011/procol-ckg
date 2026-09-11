@@ -107,6 +107,7 @@ const server = createServer(async (req, res) => {
     const question = String(parsed.question || "").trim();
     if (!question) return json(res, 400, { error: "question is required" });
     const refs = Array.isArray(parsed.refs) && parsed.refs.length ? parsed.refs : ["main"];
+    const style = ["code", "simple", "auto"].includes(parsed.style) ? parsed.style : "auto";
 
     const known = await resolveScope(refs);
     if (!known.commits.length) {
@@ -127,7 +128,7 @@ const server = createServer(async (req, res) => {
       if (auth.user?.dev_mode) {
         emit({ type: "status", text: "AUTH_MODE=dev — requests are not authenticated" });
       }
-      await ask({ question, refs, emit });
+      await ask({ question, refs, emit, style });
     } catch (e) {
       emit({ type: "error", code: "agent_failed", message: e.message });
     } finally {
