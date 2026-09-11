@@ -203,6 +203,38 @@ async function askUncached({ question, refs = ["main"], emit, style = "auto" }) 
  * It is deliberately obvious that it is a mock -- it must never be mistaken for
  * a real answer.
  */
+/**
+ * What the DOCUMENTS say, next to what the code does. Searches uploaded business documents and in-repo
+ * docs, emits each passage as a DOCUMENT claim with its own evidence (so the UI can always show where it
+ * came from), and returns the compact facts the answer is written from. Documents are DOCUMENTED evidence:
+ * intent, not proof -- the prompt rules below make the answer say which side wins.
+ * `hint` is extra text for the query (the anchor's human name, a route) so identifier-heavy questions
+ * still land on the business rule written in product words.
+ */
+async function attachDocuments({ question, hint = "", refs, emit, seen = new Set(), k = 3, min_score = 0.5, deadline_ms = 0 }) {
+  const query = hint ? `${question}\n${hint}` : question;
+  // Never let documents slow the answer: past the deadline they are simply left out (warm search is ~12 ms).
+  const search = searchDocs({ question: query, k, refs, min_score }).catch(() => ({ passages: [] }));
+  const res = deadline_ms > 0
+    ? await Promise.race([search, new Promise(r => setTimeout(() => r({ passages: [], timed_out: true }), deadline_ms))])
+    : await search;
+  if (res.timed_out) { emit({ type: "status", text: "documentation search skipped: over the time budget" }); return []; }
+  const passages = res.passages || [];
+  if (!passages.length) return [];
+  emit({ type: "status", text: `reading ${passages.length} documentation passage${passages.length > 1 ? "s" : ""}: ${[...new Set(passages.map(p => p.title))].slice(0, 3).join(" · ")}` });
+  for (const p of passages) if (!seen.has(`doc:${p.doc_id}`)) {
+    seen.add(`doc:${p.doc_id}`);
+    emit({ type: "evidence", id: `d${p.doc_id}`, repo: p.repo || "uploads", path: p.path, line: null, ref: refs.join(","), extractor: "docs" });
+    emit({ type: "claim", id: `doc${p.doc_id}`, text: `DOCUMENT ${p.title} — ${p.heading_path}`, kind: "DOCUMENT", name: p.title, path: p.path, line: null,
+           edge: "MENTIONS", depth: 0, evidence_ids: [`d${p.doc_id}`], confidence: Number(p.score.toFixed(2)) });
+  }
+  return passages.map(p => ({ title: p.title, path: p.path, source: p.source || "repo", kind: p.subkind, tags: p.tags,
+                              heading: p.heading_path, score: Number(p.score.toFixed(2)), text: p.text.slice(0, 1800) }));
+}
+
+/** "Api::V1::ActivityLogsController#index" -> "api v1 activity logs controller index": product words for the doc search. */
+const humanize = (s) => String(s || "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[:#_\/.\-]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+
 async function mockRun({ question, refs, emit, t0 }) {
   emit({ type: "status", text: "MOCK PROVIDER — no model configured" });
 
@@ -241,9 +273,12 @@ async function mockRun({ question, refs, emit, t0 }) {
                   evidence_ids: [Number(n.id)], confidence: 0.95 });
   });
   for (const c of claims) { emit({ type: "claim", ...c }); emit({ type: "token", text: c.text + " " }); }
+  // business documents fire in mock mode too, so the UI's DOCUMENT rendering can be tested offline
+  const documents = await attachDocuments({ question, hint: humanize(seed?.name || seed?.fqn), refs, emit, min_score: 0.72 });
+  for (const d of documents) emit({ type: "token", text: `[MOCK] Documented: ${d.title} § ${d.heading}. ` });
 
-  const summary = { type: "done", claim_count: claims.length, evidence_count: ev.evidence.length,
-                    tool_calls: 3, unresolved_count: (trace.unresolved ?? []).length,
+  const summary = { type: "done", claim_count: claims.length + documents.length, evidence_count: ev.evidence.length + documents.length,
+                    tool_calls: 4, unresolved_count: (trace.unresolved ?? []).length,
                     refs, provider: "mock", ms: Date.now() - t0 };
   emit(summary);
   return summary;
@@ -333,8 +368,14 @@ async function guidedRun({ question, refs, emit, t0, p, intent = "code" }) {
 
   // 2. trace both ways
   emit({ type: "status", text: `tracing from ${seed.name || seed.fqn}` });
-  const fwd = await traceFrom({ entity_id: Number(seed.id), refs, depth: 6, direction: "forward" });
-  const rev = await traceFrom({ entity_id: Number(seed.id), refs, depth: 3, direction: "reverse" });
+  // The business rule rides alongside the code trace: documents are searched with the anchor's human name
+  // added to the question, in parallel, so the fast path stays fast and the answer can compare doc vs code.
+  const [fwd, rev, documents] = await Promise.all([
+    traceFrom({ entity_id: Number(seed.id), refs, depth: 6, direction: "forward" }),
+    traceFrom({ entity_id: Number(seed.id), refs, depth: 3, direction: "reverse" }),
+    // strict floor: relevant passages score ~0.8, unrelated in-repo docs ~0.67 with this model; 400 ms budget runs under the trace itself
+    attachDocuments({ question, hint: [humanize(seed.name || seed.fqn), seed.attrs?.route_path || seed.attrs?.path_pattern || ""].filter(Boolean).join(" "), refs, emit, min_score: 0.72, deadline_ms: 400 }),
+  ]);
 
   // 3. evidence for everything we will cite
   // Upstream callers are handed to the model, so they must be citable too -- otherwise
@@ -395,6 +436,8 @@ async function guidedRun({ question, refs, emit, t0, p, intent = "code" }) {
     truncated: !!fwd.truncated,
     hubs_not_expanded: fwd.hubs_not_expanded ?? [],
     approximate_match: !!found.weak,
+    // what people WROTE the system should do, next to what the code DOES (DOCUMENTED: intent, not proof)
+    documents: documents.slice(0, 3).map(d => ({ ...d, text: d.text.slice(0, 900) })),
   };
 
   const prompt = `Write a short answer to the question using ONLY the JSON facts below.
@@ -412,8 +455,13 @@ STRICT RULES
   mechanics -- never write "the anchor is", "the unresolved list is empty", "truncated is false",
   "no hubs were skipped", "the match was exact". Mention unresolved/truncated/hubs ONLY when they
   are non-empty or true, in one sentence at the end.
+- If "documents" is non-empty: the code facts above are the answer; THEN add the business rule the
+  documents state, in one or two sentences, citing each as <path> § <heading>. Say plainly whether the
+  code AGREES with the document, CONFLICTS with it, or the code side is NOT VISIBLE in these facts. On a
+  conflict the code wins and you say the document may be stale. A document is intent, never proof of
+  what the code does -- do not restate a document as if it were observed code behaviour.
 - End with the refs read (${refs.join(", ")}) in a short trailing clause.
-- 6 sentences maximum. No preamble, no bullet lists.
+- ${facts.documents.length ? "8" : "6"} sentences maximum. No preamble, no bullet lists.
 
 FACTS
 ${JSON.stringify(facts, null, 1).slice(0, 12000)}`;
@@ -449,8 +497,8 @@ ${JSON.stringify(facts, null, 1).slice(0, 12000)}`;
 
   emitContextPaths(JSON.stringify(facts), emit);
   await emitRefsFooter(refs, emit);
-  const summary = { type: "done", claim_count: claims.length, evidence_count: ev.evidence.length,
-                    tool_calls: 4, unresolved_count: (fwd.unresolved ?? []).length,
+  const summary = { type: "done", claim_count: claims.length + documents.length, evidence_count: ev.evidence.length + documents.length,
+                    tool_calls: 5, unresolved_count: (fwd.unresolved ?? []).length,
                     refs, provider: `${p.base} · ${p.model}`, mode: "guided", ms: Date.now() - t0 };
   emit(summary);
   return summary;
@@ -862,19 +910,9 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
     Promise.all(specs.map(spec => listEntities({ kind: spec.kind, path_prefix: spec.path_prefix ?? null, name_contains: spec.name_contains ?? null, subkind: spec.subkind ?? null, refs, limit: LIST_LIMIT }))),
     Promise.all(sqlStmts.map(stmt => runSql({ sql: stmt }).then(r => ({ stmt, r })))),
     Promise.all(prefs.map(pref => endpointFamily({ path_prefix: pref, refs }))),
-    searchDocs({ question, k: 6, refs }).catch(() => ({ passages: [] })),   // what the DOCS say, next to what the code does
+    attachDocuments({ question, refs, emit, seen, k: 6, min_score: 0.45 }),   // what the DOCS say, next to what the code does
   ]);
-  const documents = (docRes.passages || []).map(p => ({ title: p.title, path: p.path, source: p.source || "repo", kind: p.subkind, tags: p.tags,
-                                                        heading: p.heading_path, score: Number(p.score.toFixed(2)), text: p.text.slice(0, 1800) }));
-  if (documents.length) {
-    emit({ type: "status", text: `reading ${documents.length} documentation passage${documents.length > 1 ? "s" : ""}: ${[...new Set(documents.map(d => d.title))].slice(0, 3).join(" · ")}` });
-    for (const p of docRes.passages) if (!seen.has(`doc:${p.doc_id}`)) {
-      seen.add(`doc:${p.doc_id}`);
-      emit({ type: "evidence", id: `d${p.doc_id}`, repo: p.repo || "uploads", path: p.path, line: null, ref: refs.join(","), extractor: "docs" });
-      emit({ type: "claim", id: `doc${p.doc_id}`, text: `DOCUMENT ${p.title} — ${p.heading_path}`, kind: "DOCUMENT", name: p.title, path: p.path, line: null,
-             edge: "MENTIONS", depth: 0, evidence_ids: [], confidence: Number(p.score.toFixed(2)) });
-    }
-  }
+  const documents = docRes;
   const matched = results.filter(r => r.match !== "none").length;
   emit({ type: "status", text: `${matched}/${results.length} lookups matched a node` });
 

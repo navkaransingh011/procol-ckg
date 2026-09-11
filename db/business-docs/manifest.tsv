@@ -1,0 +1,17 @@
+# slug	title	tags	owner	source_file
+product-training-recordings	Product training: demo recordings index	training,onboarding	CS team	Product training doc.docx
+procurement-kt-post-award-journey	Procurement KT: post-award journey (PO to payment)	p2p,po,invoice,qan,asn,grn,tax	Product	Copy of Procurement -KT.docx
+amns-vendor-portal-manual	AMNS vendor portal user manual (trade.procol.in)	bidding,vendor,amns,rfq,auction,messaging	CS team	AMNS-Vendor.pdf
+customer-support-ticket-workflow	Customer support ticket workflow and SLAs	support,sla,hubspot	CS team	Customer Support Workflow.docx
+technical-evaluation-tr-planner-area-incharge	Technical evaluation: submitting the TR as planner and area incharge	evaluation,technical-stage,approvals,amns	CS team	HowtosubmitTRfortechnicalstageasplannerandareaincharges.pdf
+vendor-awarding-and-po-creation	Vendor awarding and PO creation	awarding,po,nfa,approvals,qcs	CS team	Vendor Awarding & PO Creation Process.pdf
+intake-request-standalone-nfa	Creating an intake request (standalone NFA)	intake,nfa,approvals	CS team	Complete Guide to Creating an Intake Request.pdf
+pr-based-event-create-and-manage	Creating and managing a PR-based event	sourcing,pr,events,rfq,technical-stage	CS team	Creating and Managing a PR-Based Event.pdf
+standalone-auction-surrogates-convert-rfq	Standalone auction: surrogate bids and converting an RFQ to an auction	bidding,auction,rfq,surrogate	CS team	Complete Guide to Creating a Standalone.pdf
+vendor-revise-prices-in-auction	Vendors: revising prices in an auction and messaging the buyer	bidding,vendor,auction,messaging	CS team	How Vendors Can Revise Prices in an Auction.pdf
+counter-offer-module	Counter offers: single and bulk, buyer and supplier sides	counter-offer,rfq,bidding	CS team	Counter Offer Module.pdf
+request-best-offers-from-suppliers	Requesting best offers from suppliers	rfq,best-offer,bidding	CS team	HowtoRequestBestOffersfromSuppliers.pdf
+mmg-forward-auction	MMG: how to create a forward auction	auction,forward-auction,mmg	CS team	MMG- FORWARD AUCTION.pptx
+mmg-request-approval-workflow	MMG: request approval workflow (approver guide)	approvals,mmg	CS team	Request Approval Workflow MMG.pptx
+amns-erfx-module-guide	AMNS eRFX module: complete feature, process and integration guide	erfx,amns,intake,sap,rfq,rfp,auction,lot-splitting,nfa	Product	AMNS_DOC_AD.docx
+reliance-retail-procure360-user-guide	Reliance Retail Procure360 complete user guide	reliance,erfx,srm,bafo,po,vendor,incoterms	Product	reliance_doc_AD.docx

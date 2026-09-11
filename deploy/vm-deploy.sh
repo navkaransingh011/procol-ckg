@@ -32,6 +32,14 @@ echo "==> applying migrations"
 set -a; . ./.env; set +a
 npm run migrate
 
+# Business documents live in the database, not the repo, so the deploy keeps them in sync with
+# db/business-docs/. Unchanged documents are skipped; a failure here must never block a release
+# (answers simply fall back to code-only until the next deploy).
+echo "==> syncing business documents"
+if ! db/business-docs/ingest.sh --replace --if-changed; then
+  echo "!! business document sync failed; continuing the deploy" >&2
+fi
+
 echo "==> restarting $SERVICE"
 sudo systemctl restart "$SERVICE"
 

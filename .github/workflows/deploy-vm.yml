@@ -23,8 +23,9 @@ name: Deploy to VM
 on:
   push:
     branches: [main]
-    # Docs and the bootstrap dump do not change what runs on the VM.
-    paths-ignore: ["db/dump/**", "docs/**", "**/*.md", "eval/out/**"]
+    # Docs and the bootstrap dump do not change what runs on the VM. db/business-docs/*.md is NOT
+    # ignored: those are ingested into the database by the deploy.
+    paths-ignore: ["db/dump/**", "docs/**", "*.md", "fe/*.md", "eval/out/**"]
   workflow_dispatch:
 
 concurrency:

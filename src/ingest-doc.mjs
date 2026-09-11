@@ -6,6 +6,7 @@
 //
 //   node --env-file=.env src/ingest-doc.mjs --file "Approval Policy.docx" --title "Approval policy" \
 //        --tags approvals,workflow --owner "CS team" --url "https://notion.so/..." [--replace]
+//   node --env-file=.env src/ingest-doc.mjs --file ... --replace --if-changed   # idempotent: skip when text+metadata are unchanged
 //   node --env-file=.env src/ingest-doc.mjs --list
 //   node --env-file=.env src/ingest-doc.mjs --delete approval-policy
 import { readFileSync } from "node:fs";
@@ -58,8 +59,18 @@ async function main() {
   const facts = docs.extract(Buffer.from(text), pathInGraph);
   const blobSha = createHash("sha1").update(text).digest("hex");
 
-  const [existing] = await q(`select id from ckg.entities where fqn=$1 and kind='DOCUMENT' and commit_sha is null`, [fqn]);
+  const [existing] = await q(`select id, encode(blob_sha,'hex') as sha, attrs from ckg.entities where fqn=$1 and kind='DOCUMENT' and commit_sha is null`, [fqn]);
   if (existing && !has("replace")) throw new Error(`${fqn} already exists; pass --replace to overwrite`);
+  // --if-changed: the deploy re-runs the whole set on every release; unchanged documents cost one SELECT.
+  if (existing && has("if-changed")) {
+    const same = existing.sha === blobSha && existing.attrs?.title === title && existing.attrs?.owner === arg("owner", null)
+              && existing.attrs?.url === arg("url", null) && JSON.stringify(existing.attrs?.tags || []) === JSON.stringify(tags);
+    // ...but only if every passage is embedded under the CURRENT model; after an EMBED_PROVIDER/EMBED_MODEL
+    // switch the text is unchanged yet the passages are invisible to search until re-embedded.
+    const [{ stale }] = same ? await q(`select count(*)::int as stale from ckg.doc_chunks where blob_sha=$1 and (embedding is null or model<>$2)`, [hex(blobSha), embedModelId()]) : [{ stale: 0 }];
+    if (same && stale === 0) { console.log(`unchanged ${fqn} (${existing.attrs?.chunks} chunks) — skipped`); return; }
+    if (same) console.log(`re-embedding ${fqn}: ${stale} passages not under ${embedModelId()}`);
+  }
   if (existing) { await q(`delete from ckg.edges where src_entity_id=$1 or dst_entity_id=$1`, [existing.id]); await q(`delete from ckg.embeddings where entity_id=$1`, [existing.id]); await q(`delete from ckg.entities where id=$1`, [existing.id]); }
 
   await q(`insert into ckg.blobs (blob_sha, size_bytes, lang) values ($1,$2,'md') on conflict do nothing`, [hex(blobSha), Buffer.byteLength(text)]);

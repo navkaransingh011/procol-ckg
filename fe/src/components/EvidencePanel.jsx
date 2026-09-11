@@ -19,7 +19,7 @@ export default function EvidencePanel({ node, onClose }) {
     try { await navigator.clipboard.writeText(where); setCopied(true); setTimeout(() => setCopied(false), 1400); } catch { /* clipboard blocked */ }
   };
   const rows = [
-    ["repo", ev?.repo || (claim.kind === "HTTP_ENDPOINT" ? "shared contract" : "—")],
+    ["repo", ev?.repo || (claim.kind === "HTTP_ENDPOINT" ? "shared contract" : claim.kind === "DOCUMENT" ? "uploaded document (DOCUMENTED: intent, not proof)" : "—")],
     ["ref", ev?.ref || "—"],
     ["commit", ev?.commit || "—"],
     ["extractor", ev?.extractor || "—"],
