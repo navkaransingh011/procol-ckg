@@ -5,6 +5,7 @@
 // a fact. Everything it can cite came from a deterministic extractor.
 import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, semanticAnchor, NARRATIVE_EDGES } from "../tools.mjs";
 import { q } from "../db.mjs";
+import { createHash } from "node:crypto";
 import { runSql, SCHEMA_DOC } from "../sqltool.mjs";
 import { chat, chatStream, provider } from "./llm.mjs";
 
@@ -72,7 +73,35 @@ const HANDLERS = { find_entity: findEntity, trace_from: traceFrom, get_evidence:
  * Runs one question. `emit(event)` receives the contract's typed events.
  * Returns a summary once done.
  */
-export async function ask({ question, refs = ["main"], emit, style = "auto" }) {
+const norm = (s) => String(s || "").toLowerCase().replace(/[^\p{L}\p{N}#./:_-]+/gu, " ").trim().replace(/\s+/g, " ");
+
+/**
+ * Cache in front of the real run. Key = question (normalised) + style + the exact commits in scope, so a
+ * re-index misses on its own. Replays the stored event stream in ~ms with one leading status line.
+ */
+export async function ask({ question, refs = ["main"], emit, style = "auto", fresh = false }) {
+  const p0 = provider();
+  if (p0.mock || fresh || process.env.CKG_ANSWER_CACHE === "0") return askUncached({ question, refs, emit, style });
+  const { commits } = await resolveScope(refs);
+  const key = createHash("sha1").update(`${norm(question)}|${style}|${[...commits].sort().join(",")}`).digest("hex");
+  const hit = await q(`update ckg.answer_cache set hits = hits + 1, last_hit = now() where key = $1 returning events, created_at, ms`, [key]).catch(() => []);
+  if (hit.length) {
+    const age = Math.round((Date.now() - new Date(hit[0].created_at).getTime()) / 60000);
+    emit({ type: "status", text: `answered before (${age < 1 ? "just now" : age < 60 ? age + " min ago" : Math.round(age / 60) + " h ago"}); replaying from cache` });
+    let summary = null;
+    for (const e of hit[0].events) { if (e.type === "done") summary = { ...e, cached: true }; emit(e.type === "done" ? summary : e); }
+    return summary;
+  }
+  const events = [];
+  const rec = (e) => { emit(e); if (e.type !== "status") events.push(e); };   // status lines are transient by design
+  const summary = await askUncached({ question, refs, emit: rec, style });
+  if (summary && !events.some(e => e.type === "error") && events.some(e => e.type === "token"))
+    await q(`insert into ckg.answer_cache (key, question, style, commits, events, ms) values ($1,$2,$3,$4,$5,$6) on conflict (key) do nothing`,
+            [key, question, style, commits, JSON.stringify(events), summary.ms ?? null]).catch(() => {});
+  return summary;
+}
+
+async function askUncached({ question, refs = ["main"], emit, style = "auto" }) {
   const t0 = Date.now();
   const p = provider();
   const collectedEvidence = new Map();
@@ -397,7 +426,7 @@ ${JSON.stringify(facts, null, 1).slice(0, 12000)}`;
   try {
     for await (const delta of chatStream({
       messages: [{ role: "system", content: guidedSystem }, { role: "user", content: prompt }],
-      max_tokens: 700,
+      max_tokens: 1400,
     })) { text += delta; emit({ type: "token", text: delta }); }
 
     if (!text) {  // provider does not support streaming -- fall back to one shot
@@ -751,8 +780,8 @@ async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYST
   const run = async (json) => {
     const messages = [{ role: "system", content: system }, { role: "user", content: `QUESTION: ${question}\n\nFACTS:\n${json}` }];
     let t = "";
-    for await (const d of chatStream({ messages, max_tokens: 1800, temperature: 0 })) t += d;
-    if (!t) t = (await chat({ messages, max_tokens: 1800, temperature: 0 })).content || "";
+    for await (const d of chatStream({ messages, max_tokens: 2400, temperature: 0 })) t += d;
+    if (!t) t = (await chat({ messages, max_tokens: 2400, temperature: 0 })).content || "";
     return t;
   };
   try { text = await run(shrink(structuredClone(facts), budget)); }
@@ -763,6 +792,8 @@ async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYST
   }
   if (!text) { emit({ type: "token", text: "(No prose available - the language model call failed twice. The claims and evidence above come from the code graph and are unaffected.)" }); return ""; }
   const clean = sanitizePaths(text, known);
+  if (chatStream.lastModel && chatStream.lastModel !== provider().model)
+    emit({ type: "status", text: `primary model stalled; answered by fallback model ${chatStream.lastModel}` });
   emit({ type: "token", text: clean.text });
   if (clean.removed) emit({ type: "status", text: `removed ${clean.removed} file path${clean.removed > 1 ? "s" : ""} the model guessed but was not given` });
   return clean.text;
@@ -783,9 +814,10 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
   emit({ type: "status", text: `planning (${p.model})${sem.length ? ` with ${sem.length} candidates by meaning` : ""}` });
   let plan = null;
   try {
-    const m = await chat({ messages: [{ role: "system", content: PLAN_SYSTEM }, { role: "user", content: `QUESTION: ${question}${candText}` }], max_tokens: 320, temperature: 0 });
+    const m = await chat({ messages: [{ role: "system", content: PLAN_SYSTEM }, { role: "user", content: `QUESTION: ${question}${candText}` }], max_tokens: 1500, temperature: 0, reasoning_effort: "minimal" });   // structured extraction: minimal thinking; the JSON itself is ~150 tokens
     plan = extractJson(m.content || "");
-  } catch (e) { emit({ type: "status", text: `planner failed (${String(e.message).slice(0, 60)}); using identifiers and candidates` }); }
+    if (chatStream.lastModel && chatStream.lastModel !== p.model) emit({ type: "status", text: `planner: primary model produced nothing in time; plan came from fallback ${chatStream.lastModel}` });
+  } catch (e) { emit({ type: "status", text: `planner failed (${String(e.message).slice(0, 120)}); using identifiers and candidates` }); }
 
   const lookups = [];
   const have = new Set();

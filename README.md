@@ -169,6 +169,30 @@ changed files, 139 for removed symbols, 0 for any other reason. A typical merge 
 
 Fresh evidence for changed code still needs the tracing harness to run on merge (not in this repo yet).
 
+## Latency
+
+Measured: our pipeline is fast (planning ~1–3 s, retrieval ~0.2 s, writing 3–25 s depending on answer
+length). The minutes users saw came from the model gateway, which answers the same one-word request in
+0.1 s or hangs it for 2+ minutes, unpredictably. Defences, all in `src/service/llm.mjs`:
+
+| Knob | Default | Effect |
+|---|---|---|
+| `LLM_HEDGE_MS` | 6 s | with no first token by then, launch a duplicate to the **fallback** model in the background |
+| `LLM_FIRST_BYTE_MS` | 12 s | the primary keeps priority until then; only if it produces nothing (or errors) is the warm hedge used. Reasoning models are silent while thinking, so "first byte" = "done thinking" -- a healthy primary must never lose to a faster-starting fallback |
+| `LLM_FALLBACK_MODEL` | `HACK26_GPT_5_6_LUNA` in `.env` | used for hedges and later attempts; the answer says when it was used (planner and writer separately) |
+| `LLM_FALLBACK_FIRST_BYTE_MS` / `LLM_FALLBACK_REASONING_EFFORT` / `LLM_FALLBACK_MAX_TOKENS` | 30 s / `minimal` / up to 8000 | LUNA reasons at length and its reasoning tokens count against `max_tokens`: at 1500 it returned no text in 6 of 8 probes. The fallback gets a patient deadline, minimal effort, and 3x the primary's budget |
+| `LLM_BREAKER_MS` | 3 min | after one primary stall, hedge immediately (t=0) for this long; auto-recovers |
+| `LLM_TIMEOUT_MS` / `LLM_ATTEMPTS` | 90 s / 3 | hard cap per attempt / attempts in total |
+| `LLM_REASONING_EFFORT` | `low` in `.env` | FAST_SMALLER is a reasoning model: it thinks silently before writing. Default effort took 33 s and could spend the whole `max_tokens` on thinking (empty answer). `low` answered the same request in 1.6 s. Reasoning tokens count against `max_tokens`, so budgets are sized for both. |
+| `CKG_ANSWER_CACHE` | on | `ckg.answer_cache`: same question + style + commits replays in ~0 ms; `fresh: true` bypasses |
+
+Every call streams, and the race is decided on the first **content** token: an empty completion
+(reasoning ate the budget, or the gateway returned nothing) is a failed attempt and moves to the hedge.
+The primary keeps priority until its deadline -- a healthy but slow-thinking primary never loses to a
+faster-starting fallback, which matters for accuracy because the fallback is the weaker model. Typical now: a
+repeat question 0 s; an identifier question ~1 s (guided) or ~25 s (plan, long technical answer);
+a plain-English question 5–40 s; a congested spell costs one fallback latency per call, not minutes.
+
 ## Self-contained database
 
 The indexer stores the text of every source file it sees (`ckg.blob_text`, content-addressed), so READ

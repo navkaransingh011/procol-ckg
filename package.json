@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "migrate": "psql \"$CKG_DATABASE_URL\" -v ON_ERROR_STOP=1 -f sql/001_core.sql -f sql/002_incremental.sql -f sql/003_shared_endpoints.sql -f sql/004_runtime_and_defects.sql -f sql/005_concepts_people_summaries.sql -f sql/006_summaries.sql -f sql/007_reader_role_and_views.sql -f sql/008_embeddings.sql -f sql/009_blob_text.sql",
+    "migrate": "psql \"$CKG_DATABASE_URL\" -v ON_ERROR_STOP=1 -f sql/001_core.sql -f sql/002_incremental.sql -f sql/003_shared_endpoints.sql -f sql/004_runtime_and_defects.sql -f sql/005_concepts_people_summaries.sql -f sql/006_summaries.sql -f sql/007_reader_role_and_views.sql -f sql/008_embeddings.sql -f sql/009_blob_text.sql -f sql/010_answer_cache.sql",
     "index": "node --env-file=.env src/index-commit.mjs",
     "serve": "node --env-file=.env src/service/server.mjs",
     "mcp": "node --env-file=.env src/mcp-server.mjs",

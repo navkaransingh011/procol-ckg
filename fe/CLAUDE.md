@@ -88,7 +88,10 @@ reachable only from Procol's network). `.env` is gitignored — never commit it 
 `GET /api/health` -> `{ ok, entities, edges, refs, last_indexed, provider, auth_mode }`
   `auth_mode` is `"dev"` today; the footer shows an amber "dev auth" tag when so.
 `GET /api/refs`   -> `{ refs: [{ ref, tenant, env, repo, indexed_at }] }`  (11 rows: 9 dashboard branches + backend main + web-bidding main)
-`POST /api/ask`   body `{ question, refs?: ["main"], style?: "auto"|"simple"|"code" }` -> `text/event-stream`
+`POST /api/ask`   body `{ question, refs?: ["main"], style?: "auto"|"simple"|"code", fresh?: boolean }` -> `text/event-stream`
+  Answers are cached per (question, style, commits). A repeat replays in ~0 ms with a leading `status`
+  "answered before (…); replaying from cache" and `done.cached === true`. Send `fresh: true` to bypass
+  (an "Ask again" affordance is a good FE addition).
 
 Read the stream with `fetch` + `ReadableStream` (as `api.js` does). Frames are `data: <json>\n\n`;
 `: ping` keep-alive comments arrive every 15 s — ignore non-`data:` lines.
@@ -125,7 +128,8 @@ Rules the FE must honour (product, not style):
   4. Known defects, 5. What the graph cannot tell you, 6. Confidence) with backticked identifiers.
   Today `Answer.jsx` renders prose as `white-space: pre-wrap` plain text — no markdown rendering yet.
 - **Honesty signals the service adds itself** (do not strip): the refs footer; a `status` like
-  "removed 1 file path the model guessed but was not given"; "(No prose available …)" fallback text.
+  "removed 1 file path the model guessed but was not given"; "primary model stalled; answered by fallback
+  model …"; "(No prose available …)" fallback text.
 - **Branch matters.** Tenants run different code; `refs` changes the answer. Default `main`.
 - **Audience is everyone at Procol.** Default styling leans calm and non-technical; engineers switch to Code.
 
