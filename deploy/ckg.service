@@ -1,0 +1,19 @@
+# Install once on the VM:
+#   sudo cp ~/procol-ckg/deploy/ckg.service /etc/systemd/system/ckg.service
+#   sudo sed -i "s/__USER__/$USER/g; s#__HOME__#$HOME#g" /etc/systemd/system/ckg.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now ckg
+[Unit]
+Description=Procol Code Graph agent
+After=network.target postgresql.service
+
+[Service]
+User=__USER__
+WorkingDirectory=__HOME__/procol-ckg
+ExecStart=/usr/bin/node --env-file=.env src/service/server.mjs
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
