@@ -225,6 +225,10 @@ schema `live` of our own Postgres, so answers can join **what the docs intend**,
   flexi PO transactions cannot run together" resolves to `fx_response_sequence_advisory_lock_enabled` without
   anyone guessing the key; the planner receives these CANDIDATE CONFIGS before it plans. Set questions use JSON
   filters (`contains: {"defaults": {"value": true}}`), and the SQL step knows the live schema.
+- **Lists are tables, shaped by the question.** Any live result with more than a few rows is sent to the UI as an exact
+  table (all rows, sync time, filter, copy) and the prose only summarises it. Columns follow the wording: "what are the
+  configs" shows key + name; add "status"/"on" for status, "describe" for descriptions, "details" for everything; the
+  filter column itself is never shown. "all / every / list / how many" fetch the whole set (up to 200).
 - Any `config_key` that comes back (candidate or row) is grepped in the backend, with context, so the answer
   can say where the code reads it and what it does there.
 - `.env` needs `LIVE_DATABASE_URL` (a UAT connection; use `sslmode=no-verify`, the cert is self-signed) and

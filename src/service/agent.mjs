@@ -524,7 +524,7 @@ Given a question, output ONLY a JSON object -- no prose, no markdown fences:
  "lists":   [{"kind": "<ENTITY_KIND>", "path_prefix": "<optional dir>", "name_contains": "<optional>", "subkind": "<optional, see note>"}],
  "sql": ["<one read-only SELECT against v_nodes / v_edges when no lookup shape above fits; optional>"],
  "live": [{"table": "<one of the live tables below>", "where": {"<col>": "<exact value>"}, "like": {"<col>": "<substring>"},
-           "contains": {"<jsonb col>": {"value": true}}, "not_null": ["<col>"], "limit": 50}],
+           "contains": {"<jsonb col>": {"value": true}}, "not_null": ["<col>"], "columns": ["<only the columns the question asks for>"], "limit": 50}],
  "endpoint_families": ["<URL path prefix, e.g. /approval_workflow/approval_requests>"],
  "greps": ["<exact code token to find every occurrence of, e.g. self.mcp? or token_type>"],
  "want_source": <true if answering needs the actual code: any "why", "how does it decide", "what does it check",
@@ -544,7 +544,11 @@ Set questions over configuration are LIVE queries with JSON filters, not lookups
 {"table":"custom_configurations","where":{"config_key":"X","status":"1"}}. like.any searches several columns at once:
 {"table":"master_configurations","like":{"any":{"columns":["config_key","name","description"],"value":"lot"}}}.
 For "all / every / which ones / how many / list" questions set "limit": 200 so the whole set comes back (it is shown to
-the user as a table); otherwise keep limit <= 50.
+the user as a table); otherwise keep limit <= 50. Choose "columns" from the QUESTION: "what are the configs" -> ["config_key","name"];
+"...and whether they are on" -> add "status"; "what do they do" -> add "description"; "which companies" -> add "company_id";
+"details / everything about" -> all columns. Never return columns the question did not ask for.
+"master config(s)" means live.master_configurations (it has its own status column); live.custom_configurations is only for
+per-company OVERRIDES ("which companies have X on"). Do not answer a master-config question from custom_configurations.
 If CANDIDATE CONFIGS are given, query THOSE keys (where config_key = the key) -- never a guessed substring.
 Patterns: a company by name -> {"table":"companies","like":{"name":"reliance"}}; a switch by key ->
 {"table":"master_configurations","like":{"config_key":"three_way"}} then {"table":"custom_configurations","like":{"config_key":"three_way"}};
@@ -919,12 +923,29 @@ async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYST
  * column ("$companies.id") wait for that table's rows and are expanded to the ids found (cap 50). This lets
  * "approval flows for Reliance" resolve company -> flows without a second model call.
  */
-async function runLivePlan(specs) {
-  const list = (specs || []).filter(x => x && typeof x.table === "string").slice(0, 4);
+async function runLivePlan(specs, question = "") {
+  const list = (specs || []).filter(x => x && typeof x.table === "string").slice(0, 4).map(x => {
+    // "master config(s)" is the catalogue table; the overrides table only answers "which companies have X on".
+    if (/master[ _-]?config/i.test(question) && x.table === "custom_configurations" && !x.where?.company_id && !/\b(compan|tenant|client)/i.test(question))
+      x = { ...x, table: "master_configurations", where: Object.fromEntries(Object.entries(x.where || {}).filter(([c]) => ["config_key", "status", "item_type"].includes(c))) };
+    // The question's own words are authoritative over the planner's filters:
+    //  - "show whether each is on" means status is a COLUMN to display, not a filter -- drop a status filter;
+    //  - "default true/false" on the catalogue is a JSON filter on defaults, whether or not the planner wrote it.
+    if (/\b(show|whether|which (are|ones are)|are they|is it|and (their|its) status)\b/i.test(question) && /\b(on|off|status|switched|enabled|active)\b/i.test(question) && x.where?.status !== undefined) {
+      const w = { ...x.where }; delete w.status; x = { ...x, where: w };
+    }
+    const m = question.match(/default(?:\s+value)?s?\s+(?:is|are|set to|of|=|to)?\s*(true|false|on|off)\b/i);
+    if (m && x.table === "master_configurations" && !(x.contains && x.contains.defaults)) {
+      const v = /true|on/i.test(m[1]);
+      x = { ...x, contains: { ...(x.contains || {}), defaults: { value: v } } };
+    }
+    return x;
+  });
   const refRe = /^\$([a-z_]+)\.([a-z_]+)$/;
   const dependsOn = (x) => Object.values(x.where || {}).map(v => typeof v === "string" && v.match(refRe)).filter(Boolean);
   const run = (x) => queryLive({ table: x.table, where: x.where || {}, like: x.like || {}, contains: x.contains || {}, not_null: Array.isArray(x.not_null) ? x.not_null : [],
-                                 limit: Math.min(Number(x.limit) || 50, 200) }).catch(e => ({ error: e.message, table: x.table }));
+                                 limit: Math.min(Number(x.limit) || 50, 500) }).then(r => ({ ...r, asked_columns: Array.isArray(x.columns) && x.columns.length ? x.columns : null }))
+                               .catch(e => ({ error: e.message, table: x.table }));
   const first = list.filter(x => !dependsOn(x).length), second = list.filter(x => dependsOn(x).length);
   const results = await Promise.all(first.map(run));
   const byTable = new Map(first.map((x, i) => [x.table, results[i]]));
@@ -948,8 +969,8 @@ async function runLivePlan(specs) {
 async function completeSets(question, results) {
   if (!/\b(all|every|which|how many|list|each)\b/i.test(question)) return results;
   return Promise.all(results.map(async (r) => {
-    if (!r || r.error || r.complete || !r.total || r.total > 200) return r;
-    const full = await queryLive({ table: r.table, where: r.where || {}, like: r.like || {}, contains: r.contains || {}, limit: 200 }).catch(() => null);
+    if (!r || r.error || r.complete || !r.total || r.total > 500) return r;
+    const full = await queryLive({ table: r.table, where: r.where || {}, like: r.like || {}, contains: r.contains || {}, limit: 500 }).catch(() => null);
     return full && !full.error ? full : r;
   }));
 }
@@ -1014,7 +1035,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
     Promise.all(sqlStmts.map(stmt => runSql({ sql: stmt }).then(r => ({ stmt, r })))),
     Promise.all(prefs.map(pref => endpointFamily({ path_prefix: pref, refs }))),
     attachDocuments({ question, refs, emit, seen, k: 6, min_score: 0.45 }),   // what the DOCS say, next to what the code does
-    runLivePlan(plan?.live),                                                   // what is switched ON right now (UAT mirror)
+    runLivePlan(plan?.live, question),                                         // what is switched ON right now (UAT mirror)
   ]);
   const documents = docRes;
   const live = await completeSets(question, liveRes.filter(Boolean));
@@ -1022,10 +1043,28 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
   // A list is DATA, not prose. Any live result with more than a handful of rows is shown to the user as an exact
   // table (all rows, as of the sync time); the model gets a compact projection and is told to summarise, not enumerate.
   const cell = (v) => v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v).slice(0, 80) : String(v).slice(0, 120);
-  const PREFER = ["config_key", "name", "key", "title", "description", "defaults", "status", "company_id", "approval_key", "template_type", "item_type", "updated_at"];
+  // Columns follow the QUESTION. Identity columns always; more only when the wording asks for it.
+  const IDENTITY = { master_configurations: ["config_key", "name"], custom_configurations: ["config_key", "company_id", "status"], procol_variables: ["key", "status"],
+                     companies: ["id", "name"], templates: ["name", "template_type"], template_responses: ["id", "template_id", "status"],
+                     approval_flows: ["name", "approval_key"], approval_flow_conditions: ["approval_flow_id", "approval_condition_id"],
+                     fx_datasources: ["name", "tenant_id"], fx_datasource_fields: ["name", "fx_datasource_id"] };
+  const WANT = [[/\b(status|active|inactive|enabled|disabled|on|off|switched)\b/i, ["status"]], [/\b(describ|what (it|they) do|meaning|explain|purpose)/i, ["description"]],
+                [/\b(default)/i, ["defaults"]], [/\b(compan|tenant|who has|which (client|customer)s?)\b/i, ["company_id", "tenant_id"]],
+                [/\b(when|updated|changed|last|recent|date)\b/i, ["updated_at"]], [/\b(type|kind)\b/i, ["template_type", "item_type", "data_type"]],
+                [/\b(config(uration)?|json|value)\b/i, ["configurations", "config", "modifications", "validations"]], [/\b(rule|trigger|condition)/i, ["approval_trigger_rule", "trigger_values"]]];
+  // The question decides what the reader sees. The planner's "columns" only narrow the FETCH; the table shows the
+  // identity columns plus whatever the wording asked for, and never a column that IS the filter (identical in every row).
+  const columnsFor = (l) => {
+    const avail = Object.keys(l.rows[0]);
+    if (/\b(details?|everything|all (the )?(columns|fields|info)|full)\b/i.test(question)) return avail.slice(0, 8);
+    const filterCols = new Set([...Object.keys(l.where || {}), ...Object.keys(l.contains || {})]);
+    const want = new Set((IDENTITY[l.table] || avail.slice(0, 2)).filter(c => avail.includes(c)));
+    for (const [re, cols] of WANT) if (re.test(question)) for (const c of cols) if (avail.includes(c) && !filterCols.has(c)) want.add(c);
+    return avail.filter(c => want.has(c)).slice(0, 8);
+  };
   for (const l of live) {
     if (l.error || !l.rows?.length || l.rows.length <= 5) continue;
-    const cols = [...PREFER.filter(c => c in l.rows[0]), ...Object.keys(l.rows[0]).filter(c => !PREFER.includes(c))].slice(0, 8);
+    const cols = columnsFor(l);
     emit({ type: "table", title: `${l.table}${Object.keys(l.like || {}).length || Object.keys(l.where || {}).length || Object.keys(l.contains || {}).length ? " (filtered)" : ""} — ${l.total} row${l.total === 1 ? "" : "s"} on UAT`,
            columns: cols, rows: l.rows.map(r => cols.map(c => cell(r[c]))), total: l.total, complete: l.complete, as_of: l.as_of, source: l.table });
     l.full_table_shown_to_user = true;

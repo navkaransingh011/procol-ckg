@@ -548,7 +548,7 @@ export async function queryLive({ table, where = {}, like = {}, contains = {}, n
   }
   for (const c of arguments[0].not_null || []) { if (spec.columns.includes(c)) conds.push(`${lident(c)} is not null`); }
   const whereSql = conds.length ? `where ${conds.join(" and ")}` : "";
-  const lim = Math.min(Math.max(1, Number(limit) || 50), 200);
+  const lim = Math.min(Math.max(1, Number(limit) || 50), 500);
   const ord = order_by && spec.columns.includes(order_by) ? `order by ${lident(order_by)} desc` : `order by ${lident(spec.cursor)} desc`;
   const [{ n }] = await q(`select count(*)::int n from live.${lident(table)} ${whereSql}`, params);
   const rows = await q(`select ${cols.map(lident).join(", ")}, synced_at from live.${lident(table)} ${whereSql} ${ord} limit ${lim}`, params);
