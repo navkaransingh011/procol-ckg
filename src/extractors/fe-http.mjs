@@ -8,8 +8,13 @@
 export const NAME = "fe-http";
 export const VERSION = "0.1-regex";
 
+// Tests call the same XHR wrapper against mocked paths. Indexing them mints
+// HTTP_CALL_SITE nodes and TARGETS edges indistinguishable from production call
+// sites, so a trace would claim a screen calls an endpoint it only calls in a test.
+const TEST_PATH = /(^|\/)(__tests__|__mocks__|tests?)\/|\.(test|spec|stories)\.[jt]sx?$/i;
+
 export function handles(path) {
-  return /\.(js|jsx)$/.test(path) && !path.includes("node_modules");
+  return /\.(js|jsx)$/.test(path) && !path.includes("node_modules") && !TEST_PATH.test(path);
 }
 
 const CALL = /promisifiedXHR\s*\(/g;

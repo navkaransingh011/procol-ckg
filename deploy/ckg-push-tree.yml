@@ -1,0 +1,97 @@
+# COPY THIS INTO THE SOURCE REPO (procol-backend, procol-client-dashboard, web-bidding)
+# as .github/workflows/ckg-push-tree.yml
+#
+# It ships the tree to the graph instead of letting the graph pull it. The VM holds no
+# credentials for this repo, and a plain webhook carries metadata only -- never file contents.
+# CI already has the checkout, so it bundles the paths the extractors actually read (a few MB,
+# not the whole repo) and POSTs them.
+#
+# Blob shas are content hashes, so the filtered bundle's blobs match the real repo's blobs
+# exactly and the graph's per-blob cache still hits. Only the bundle's own commit sha is
+# synthetic, which is why the real sha travels beside it and is what the graph records.
+#
+# Repo secrets required:
+#   CKG_INDEX_URL      https://<vm-host>/index
+#   CKG_INDEX_SECRET   same value as INDEX_WEBHOOK_SECRET in the VM's .env
+name: CKG push tree
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # One in flight per ref. A second merge supersedes a queued first instead of racing it.
+  group: ckg-push-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  push-tree:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1          # only this commit's tree is ever read
+
+      - name: Build filtered bundle
+        id: bundle
+        env:
+          REAL_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Exactly what the extractors read (be-ast, be-routes, be-schema, be-external,
+          # fe-http, docs) plus what gets its text stored for READ/GREP. Anything else is
+          # weight the graph would throw away.
+          mkdir -p /tmp/tree
+          for p in app lib config db src spec test scripts mcp_tools; do
+            [ -d "$p" ] && cp -a --parents "$p" /tmp/tree/ || true
+          done
+          find . -maxdepth 1 -name '*.md' -exec cp -a --parents {} /tmp/tree/ \; || true
+
+          # Secrets never leave CI, independent of the graph's own filter.
+          find /tmp/tree \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name 'id_rsa*' \
+                            -o -name '*.key' -o -name '*.p12' \) -delete || true
+
+          cd /tmp/tree
+          git init -q .
+          git config user.email ckg@procol.in
+          git config user.name  "CKG indexer"
+          git add -A
+          # The message carries the real sha so the bundle is self-describing if ever inspected.
+          git commit -qm "tree of ${REAL_SHA}"
+          git bundle create /tmp/tree.bundle --all
+
+          echo "size=$(stat -c%s /tmp/tree.bundle)" >> "$GITHUB_OUTPUT"
+          ls -lh /tmp/tree.bundle
+
+      - name: Ship to the graph
+        env:
+          URL:    ${{ secrets.CKG_INDEX_URL }}
+          SECRET: ${{ secrets.CKG_INDEX_SECRET }}
+          REPO:   ${{ github.event.repository.name }}
+          REF:    ${{ github.ref_name }}
+          SHA:    ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # The signature covers the exact bytes sent, so the body is built once to a file and
+          # both signed and posted from there -- re-serialising would change the digest.
+          python3 - <<'PY' > /tmp/body.json
+          import base64, json, os
+          print(json.dumps({
+            "repo":   os.environ["REPO"],
+            "ref":    os.environ["REF"],
+            "sha":    os.environ["SHA"],
+            "bundle": base64.b64encode(open("/tmp/tree.bundle","rb").read()).decode(),
+          }))
+          PY
+
+          SIG="sha256=$(openssl dgst -sha256 -hmac "$SECRET" -binary < /tmp/body.json | xxd -p -c 256)"
+
+          curl -fsS --max-time 120 -X POST "$URL" \
+            -H "content-type: application/json" \
+            -H "x-ckg-signature: $SIG" \
+            --data-binary @/tmp/body.json
+          echo

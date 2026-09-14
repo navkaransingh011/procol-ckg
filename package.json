@@ -9,6 +9,8 @@
     "serve": "node --env-file=.env src/service/server.mjs",
     "mcp": "node --env-file=.env src/mcp-server.mjs",
     "index:all": "node --env-file=.env src/index-all.mjs",
+    "index:serve": "node --env-file=.env src/index-service.mjs",
+    "gc": "node --env-file=.env src/gc.mjs",
     "test": "node --env-file=.env --test",
     "eval": "node --env-file=.env src/eval.mjs",
     "import:kb": "node --env-file=.env src/import-kb.mjs",
