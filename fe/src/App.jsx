@@ -1,14 +1,24 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useLayoutEffect, useRef } from "react";
 import Background from "./components/Background.jsx";
+import IconField from "./components/IconField.jsx";
+import Login from "./components/Login.jsx";
 import Composer from "./components/Composer.jsx";
 import Answer from "./components/Answer.jsx";
 import { useAgent } from "./useAgent.js";
 
-const SUGGESTIONS = [
-  "What happens when GET /activity_logs is called?",
-  "Which dashboard screens fetch pending approvals?",
-  "What happens if I add a third Session token_type?",
-];
+// Starters follow the role: engineers get code-shaped questions, everyone else gets product-shaped ones.
+const SUGGESTIONS = {
+  code: [
+    "What happens when GET /activity_logs is called?",
+    "Which dashboard screens fetch pending approvals?",
+    "What happens if I add a third Session token_type?",
+  ],
+  plain: [
+    "How do approval workflows decide who approves a PO?",
+    "Which master configs are on by default?",
+    "What does the flexi PO lock setting change for a buyer?",
+  ],
+};
 
 /** Suggestion chip that tilts a few degrees toward the pointer. */
 function Suggestion({ text, onClick }) {
@@ -25,8 +35,10 @@ function Suggestion({ text, onClick }) {
 export default function App() {
   const g = useAgent();
   const input = useRef(null);
+  const bar = useRef(null);
   const live = g.turns.length > 0;
   const offline = g.health && g.health.ok === false;
+  const suggestions = g.me?.can?.code_source ? SUGGESTIONS.code : SUGGESTIONS.plain;
   const refNames = [...new Set(g.refs.map((r) => r.ref))].sort((a, b) => (a === "main" ? -1 : b === "main" ? 1 : a.localeCompare(b)));
 
   // `/` focuses the composer from anywhere; Esc stops a running question.
@@ -40,21 +52,39 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [g.asking, g.stop]);
 
+  // The icon field dissolves exactly where the question bar sits, so tell CSS where that is.
+  useLayoutEffect(() => {
+    const el = bar.current;
+    if (!el) return;
+    const place = () => {
+      const r = el.getBoundingClientRect();
+      document.documentElement.style.setProperty("--bar-y", `${Math.round(r.top + r.height / 2)}px`);
+    };
+    place();
+    const ro = new ResizeObserver(place);
+    ro.observe(el); ro.observe(document.body);
+    window.addEventListener("resize", place);
+    return () => { ro.disconnect(); window.removeEventListener("resize", place); };
+  }, [live]);
+
+  if (g.me === undefined) return <div className="app"><Background /><IconField /></div>;   // checking the session
+  if (!g.me) return (
+    <div className="app app--login">
+      <Background />
+      <IconField />
+      <Login cfg={g.authCfg} onSignIn={g.signIn} error={g.authError} busy={g.authBusy} />
+    </div>
+  );
+
   return (
     <div className={`app${live ? " app--live" : ""}`}>
       <Background dim={live} />
+      <IconField dim={live} />
       <header className="top">
         <button type="button" className="brand" onClick={g.reset} title="Start over">
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>Code Graph
         </button>
         <div className="top-right">
-          <div className="seg" role="tablist" aria-label="Answer style">
-            {[["auto", "Auto"], ["simple", "Simple"], ["code", "Code"]].map(([v, label]) => (
-              <button key={v} type="button" role="tab" aria-selected={g.style === v}
-                className={`seg-btn${g.style === v ? " seg-btn--on" : ""}`}
-                onClick={() => g.setStyle(v)} disabled={g.asking}>{label}</button>
-            ))}
-          </div>
           {refNames.length > 1 && (
             <label className="refpick" title="Branch to read">
               <span className="ref-dot" aria-hidden="true" />
@@ -64,14 +94,23 @@ export default function App() {
             </label>
           )}
           {live && <button type="button" className="ghost" onClick={g.reset}>New question</button>}
+          <div className="who" title={g.me.email}>
+            {g.me.picture ? <img className="avatar" src={g.me.picture} alt="" referrerPolicy="no-referrer" /> : <span className="avatar avatar--txt" aria-hidden="true">{(g.me.name || g.me.email)[0].toUpperCase()}</span>}
+            <span className="who-name">{g.me.name || g.me.email}</span>
+            <span className={`role role--${g.me.role}`}>{g.me.label || g.me.role}</span>
+            <button type="button" className="ghost ghost--sm" onClick={g.signOut}>Sign out</button>
+          </div>
         </div>
       </header>
 
       <main className="stage">
         {!live && (
           <div className="hero">
-            <h1>Ask the codebase.</h1>
-            <p>Every answer names the file and line that proves it, and says so when it cannot tell.</p>
+            <p className="eyebrow">Procol · Code Graph</p>
+            <h1>Ask the <em>codebase</em>.</h1>
+            <p>{g.me.can?.paths
+              ? "Every answer names the file and line that proves it, and says so when it cannot tell."
+              : "Every answer is grounded in the code, the documents and live platform data, and says so when it cannot tell."}</p>
           </div>
         )}
 
@@ -79,11 +118,14 @@ export default function App() {
           <div className="offline"><span className="offline-dot" aria-hidden="true" />The code graph service is not reachable. Start it with <code>npm run serve</code> in procol-ckg.</div>
         )}
 
-        <Composer inputRef={input} onSend={g.ask} onStop={g.stop} asking={g.asking} disabled={offline} autoFocus />
+        <div className="bar" ref={bar}>
+          <Composer inputRef={input} onSend={g.ask} onStop={g.stop} asking={g.asking} disabled={offline} autoFocus
+                    placeholder={g.me.can?.code_names ? "Ask about a file, an endpoint or a flow" : "Ask how something works on the platform"} />
+        </div>
 
         {!live && !offline && (
           <div className="suggestions">
-            {SUGGESTIONS.map((s) => <Suggestion key={s} text={s} onClick={() => g.ask(s)} />)}
+            {suggestions.map((s) => <Suggestion key={s} text={s} onClick={() => g.ask(s)} />)}
           </div>
         )}
 
@@ -112,7 +154,6 @@ export default function App() {
 
       <footer className="meta">
         {g.health?.ok && <span>{Number(g.health.entities).toLocaleString()} facts · {Number(g.health.edges).toLocaleString()} edges · {g.health.refs} branches</span>}
-        {g.health?.ok && g.health.auth_mode === "dev" && <span className="warn">dev auth</span>}
         <span className="hint"><kbd>/</kbd> focus · <kbd>Esc</kbd> stop</span>
       </footer>
     </div>

@@ -581,3 +581,16 @@ export async function searchConfigs({ question, k = 6, min_score = 0.4 }) {
   const [st] = await q(`select last_run from live.sync_state where table_name='master_configurations'`).catch(() => [{}]);
   return { model, as_of: st?.last_run ?? null, configs: rows.filter(r => Number(r.score) >= min_score).map(r => ({ ...r, score: Number(Number(r.score).toFixed(2)), overrides: Number(r.overrides), overrides_active: Number(r.overrides_active), companies_active: Number(r.companies_active) })) };
 }
+
+
+/** search_live -- templates, approval flows, datasources and environment switches by MEANING (live.search_index). */
+export async function searchLive({ question, k = 6, min_score = 0.5 }) {
+  const { embed, embedModelId, toPgVector } = await import("./service/embed.mjs");
+  const model = embedModelId();
+  const [v] = await embed([question], { isQuery: true });
+  const rows = await q(
+    `select si.kind, si.ref_id, si.company_id, si.text, c.name as company, (1 - (si.embedding <=> $1::vector))::float as score
+       from live.search_index si left join live.companies c on c.id = si.company_id
+      where si.model = $2 order by si.embedding <=> $1::vector limit $3`, [toPgVector(v), model, k]).catch(() => []);
+  return { model, hits: rows.filter(r => Number(r.score) >= min_score).map(r => ({ ...r, score: Number(Number(r.score).toFixed(2)) })) };
+}
