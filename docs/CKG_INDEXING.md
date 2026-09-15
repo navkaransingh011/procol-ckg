@@ -5,12 +5,18 @@ later procol-client-dashboard, web-bidding) merges to a tracked ref, the new tre
 database on the VM — entities, edges, `blob_text`, embeddings — without anyone running `npm run
 index` by hand.
 
-Wired today: **procol-backend @ main**.
+Wired today: **procol-backend @ `procol-ckg` and `main`**.
+
+`procol-ckg` is the pipeline's own branch in procol-backend. It exists so the whole path can run
+for real — bundle, tunnel, index, embed, gc — without merging a workflow into `main` first. It is
+allowlisted as `env: ci` so its snapshots stay distinguishable from the deployed ones in
+`ref_history`. When `main` adopts the workflow, nothing needs editing: both refs are already
+listed in the workflow and in `config/refs.json`.
 
 ## Shape
 
 ```
-merge to main
+push to procol-ckg (or main)
   └─ procol-backend/.github/workflows/ckg-push-tree.yml   (the ONLY file added to that repo)
        ├─ builds a git bundle of app lib config db spec test scripts mcp_tools + root *.md
        ├─ WIF → IAP tunnel to VM:22 → ssh -L 8788:127.0.0.1:8788
@@ -53,8 +59,9 @@ schema and the indexer, not in the CI script:
 | Two merges racing | The endpoint answers 202 and runs a **serial** queue; the workflow's `concurrency` group also supersedes a queued run with the newer commit. |
 | A repo indexing itself under a made-up tenant | `config/refs.json` **on the VM** is the allowlist and the only source of `tenant`/`env`. A ref that is not listed gets 403. The request's own claims are ignored. |
 
-Adding a tenant ref is an edit to `config/refs.json` plus a branch in the source workflow's
-`on.push.branches` — not a code change.
+Adding a ref is an edit to `config/refs.json` **on the VM** plus a branch in the source
+workflow's `on.push.branches` — not a code change. Both lists must agree: the VM's copy decides,
+so a branch added only to the workflow gets a 403 and a ref added only to `refs.json` never fires.
 
 ## One-time setup
 
