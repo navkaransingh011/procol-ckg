@@ -51,6 +51,16 @@ fi
 echo "==> restarting $SERVICE"
 sudo systemctl restart "$SERVICE"
 
+# The indexer is a second process running THIS SAME checkout (deploy/ckg-index.service). Without
+# this it keeps executing the pre-deploy code until someone restarts it by hand, so a fix to an
+# extractor would ship to the agent and not to indexing. Skipped silently when the unit is not
+# installed, and never fatal: a release must not fail because indexing is down.
+if systemctl list-unit-files "${CKG_INDEX_SERVICE:-ckg-index}.service" --no-legend | grep -q .; then
+  echo "==> restarting ${CKG_INDEX_SERVICE:-ckg-index}"
+  sudo systemctl restart "${CKG_INDEX_SERVICE:-ckg-index}" || \
+    echo "!! ${CKG_INDEX_SERVICE:-ckg-index} did not restart; indexing is stale until it does" >&2
+fi
+
 echo "==> waiting for health"
 for i in $(seq 1 30); do
   if curl -fsS --max-time 5 "$HEALTH_URL" | grep -q '"ok":true'; then

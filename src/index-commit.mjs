@@ -126,11 +126,18 @@ async function main() {
   const tenant = arg("tenant", null);
   const env = arg("env", null);
   const asRef = arg("as", null);   // record a raw SHA under the ref name it was, e.g. --ref 1089000b3a --as main
+  // CI ships a filtered tree (only the paths extractors read) as a throwaway git repo, so the
+  // local commit SHA is synthetic. Blob SHAs are content hashes and stay identical, so the cache
+  // still works -- only the commit identity has to be passed in to stay traceable to GitHub.
+  const realSha = arg("commit-sha", null);
+  const repoNameArg = arg("repo-name", null);
   if (!repoDir) throw new Error("--repo-dir is required");
+  if (realSha && !/^[0-9a-f]{40}$/i.test(realSha)) throw new Error("--commit-sha must be a 40-char hex SHA");
 
   const t0 = Date.now();
-  const repoName = path.basename(path.resolve(repoDir));
-  const commit = await resolveRef(repoDir, ref);
+  const repoName = repoNameArg || path.basename(path.resolve(repoDir));
+  const local = await resolveRef(repoDir, ref);
+  const commit = realSha ? { ...local, sha: realSha.toLowerCase() } : local;
 
   const repoId = await upsertRepo("procol", repoName, repoName.includes("backend") ? "monolith" : "spa");
   // A ref currently pointing at an imported (kb-import) commit holds data no extractor can reproduce
@@ -157,7 +164,8 @@ async function main() {
   );
 
   // ---------- tree ----------
-  const tree = (await listTree(repoDir, commit.sha))
+  // Read from the LOCAL sha: under --commit-sha the GitHub sha is not an object in this repo.
+  const tree = (await listTree(repoDir, local.sha))
     .filter((f) => !SECRET_PATHS.test(f.path))       // secrets never enter the graph
     .filter((f) => f.sizeBytes <= MAX_BLOB_BYTES);
 

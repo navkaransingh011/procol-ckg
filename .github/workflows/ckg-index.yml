@@ -1,4 +1,12 @@
-# COPY THIS INTO procol-client-dashboard AND procol-backend (.github/workflows/).
+# SUPERSEDED -- kept for reference only. Do NOT copy this into a source repo.
+#
+# This is the PULL model: the source repo's CI connects straight to the graph database with
+# CKG_DATABASE_URL. That means every source repo holds write credentials to the graph, and the
+# database has to be reachable from GitHub's runners. The shipped pipeline is the PUSH model
+# instead -- deploy/ckg-push-tree.yml + src/index-service.mjs, documented in docs/CKG_INDEXING.md:
+# CI sends a filtered git bundle through an IAP tunnel, the VM holds the only database credential,
+# and config/refs.json on the VM decides which refs may be indexed at all.
+#
 # Fires the moment a merge lands on a deployed ref. Nothing else is indexed.
 name: CKG index
 

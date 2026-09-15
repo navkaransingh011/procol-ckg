@@ -129,5 +129,6 @@ using Ruby 3 syntax, marking those symbols HEURISTIC.
 ## Not covered here
 
 This deploys the AGENT. Keeping the GRAPH fresh when procol-backend / procol-client-dashboard /
-web-bidding merge is a separate pipeline (`.github/workflows/ckg-index.yml`, still a template).
-That one needs a clone of the merged commit, so it either runs on the VM or ships the commit to it.
+web-bidding merge is a separate pipeline: **`docs/CKG_INDEXING.md`**. It ships the merged tree to
+`src/index-service.mjs` on this same VM over the same IAP tunnel, so it needs the setup above to
+already work. `.github/workflows/ckg-index.yml` is the superseded pull-model draft; do not copy it.

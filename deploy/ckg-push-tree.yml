@@ -1,0 +1,188 @@
+# Ships this repo's tree to the Procol Code Graph (procol-ckg) on every merge to main, so the
+# agent answers from the code that is actually deployed instead of a stale snapshot.
+#
+# THIS IS THE ONLY FILE THIS PIPELINE ADDS TO THIS REPOSITORY. It reads the checkout CI already
+# has and POSTs it out. It builds nothing, changes no branch, and touches no other workflow.
+#
+# Why push and not pull: the graph VM holds no credentials for this repo, and a plain GitHub
+# webhook carries metadata only -- never file contents. CI already has the tree, so it bundles
+# just the paths the graph's extractors read and sends those.
+#
+# Why the payload is a git bundle and not a tarball: blob shas are content hashes, so the
+# filtered bundle's blobs are byte-identical to this repo's blobs and the graph's per-blob parse
+# cache still hits. Only the bundle's own commit sha is synthetic, which is why the real
+# ${{ github.sha }} travels beside it and is what the graph records.
+#
+# Transport: Workload Identity Federation -> IAP tunnel -> SSH local port-forward. The graph's
+# index endpoint stays bound to 127.0.0.1 on the VM and is never exposed to the internet.
+# Nothing long-lived is stored here except the SSH key; GitHub mints the GCP token per run.
+#
+# Required repository secrets:
+#   GCP_WIF_PROVIDER    projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
+#   GCP_SERVICE_ACCOUNT ckg-deployer@<project>.iam.gserviceaccount.com
+#   CKG_SSH_KEY         private half of the graph VM's deploy keypair
+#   CKG_INDEX_SECRET    same value as INDEX_WEBHOOK_SECRET in the VM's .env
+# Required repository variables:
+#   GCP_PROJECT         the graph VM's project id
+#   VM_NAME             procol-ckg
+#   VM_ZONE             asia-south1-c
+#   VM_SSH_USER         the VM's deploy user
+name: CKG push tree
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # One in flight per ref. A second merge supersedes a queued first instead of racing it --
+  # the graph indexes whole-tree snapshots, so only the newest commit is worth sending.
+  group: ckg-push-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write          # required to mint the WIF token
+
+jobs:
+  push-tree:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1   # only this commit's tree is ever read
+
+      - name: Build filtered bundle
+        env:
+          REAL_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Exactly what the graph's extractors read (be-ast, be-routes, be-schema, be-external,
+          # fe-http, docs) plus what gets its text stored so the agent can READ and GREP it
+          # without a clone. Anything else is weight the graph would discard on arrival.
+          mkdir -p /tmp/tree
+          for p in app lib config db spec test scripts mcp_tools; do
+            [ -d "$p" ] && cp -a --parents "$p" /tmp/tree/ || true
+          done
+          find . -maxdepth 1 -name '*.md' -exec cp -a --parents {} /tmp/tree/ \; || true
+
+          # Belt and braces: the graph filters secrets too, but they must not leave CI at all.
+          find /tmp/tree \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name 'id_rsa*' \
+                            -o -name '*.key' -o -name '*.p12' \) -delete || true
+
+          cd /tmp/tree
+          git init -q .
+          git config user.email ckg@procol.in
+          git config user.name  "CKG indexer"
+          git add -A
+          # The message carries the real sha so the bundle is self-describing if ever inspected.
+          git commit -qm "tree of ${REAL_SHA}"
+          git bundle create /tmp/tree.bundle --all
+          ls -lh /tmp/tree.bundle
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT }}
+
+      # Tunnel, forward, POST and poll must share ONE step: a backgrounded process started in
+      # one `run:` block does not survive into the next, because each step is its own shell.
+      - name: Ship to the graph and wait for the index run
+        env:
+          SECRET:  ${{ secrets.CKG_INDEX_SECRET }}
+          SSH_KEY: ${{ secrets.CKG_SSH_KEY }}
+          VM_NAME: ${{ vars.VM_NAME }}
+          VM_ZONE: ${{ vars.VM_ZONE }}
+          VM_USER: ${{ vars.VM_SSH_USER }}
+          REPO:    ${{ github.event.repository.name }}
+          REF:     ${{ github.ref_name }}
+          SHA:     ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          install -m 600 /dev/null /tmp/ckg_ci_key
+          printf '%s\n' "$SSH_KEY" > /tmp/ckg_ci_key
+          TUNNEL_PID=""; FWD_PID=""
+          # Declared before the trap so `set -u` cannot turn a cleanup into an error that masks
+          # the real exit code.
+          trap 'kill $TUNNEL_PID $FWD_PID 2>/dev/null; rm -f /tmp/ckg_ci_key /tmp/body.json' EXIT
+
+          # hop 1: IAP to the VM's port 22. No public SSH port, no firewall change.
+          gcloud compute start-iap-tunnel "$VM_NAME" 22 \
+            --zone "$VM_ZONE" --local-host-port=localhost:2222 --quiet &
+          TUNNEL_PID=$!
+          for i in $(seq 1 20); do
+            (echo > /dev/tcp/localhost/2222) 2>/dev/null && break
+            sleep 1
+          done
+
+          # hop 2: SSH local forward onto the VM's LOOPBACK 8788. The index service binds
+          # 127.0.0.1 by design, so only something already inside the VM can reach it -- and
+          # this forward is that something.
+          ssh -i /tmp/ckg_ci_key -N \
+            -o StrictHostKeyChecking=accept-new \
+            -o UserKnownHostsFile=/tmp/ckg_known_hosts \
+            -o ExitOnForwardFailure=yes \
+            -p 2222 -L 8788:127.0.0.1:8788 "$VM_USER@localhost" &
+          FWD_PID=$!
+          for i in $(seq 1 20); do
+            (echo > /dev/tcp/localhost/8788) 2>/dev/null && break
+            sleep 1
+          done
+
+          # The signature covers the exact bytes sent, so the body is written to a file once and
+          # both signed and posted from there -- re-serialising the JSON would change the digest.
+          python3 - <<'PY' > /tmp/body.json
+          import base64, json, os
+          print(json.dumps({
+            "repo":   os.environ["REPO"],
+            "ref":    os.environ["REF"],
+            "sha":    os.environ["SHA"],
+            "bundle": base64.b64encode(open("/tmp/tree.bundle","rb").read()).decode(),
+          }))
+          PY
+
+          # openssl's own -hex, not `| xxd -p`: xxd ships with vim and is absent on plenty of
+          # hosts, which turns a missing package into a confusing 401 instead of a clear error.
+          SIG="sha256=$(openssl dgst -sha256 -hmac "$SECRET" -hex < /tmp/body.json | awk '{print $NF}')"
+
+          ACCEPT=$(curl -fsS --max-time 300 -X POST "http://127.0.0.1:8788/index" \
+            -H "content-type: application/json" \
+            -H "x-ckg-signature: $SIG" \
+            --data-binary @/tmp/body.json)
+          echo "$ACCEPT"
+          JOB=$(printf '%s' "$ACCEPT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job"])')
+          echo "queued as job $JOB" >> "$GITHUB_STEP_SUMMARY"
+
+          # The endpoint answers 202 and indexes on a serial queue, so a green POST only means
+          # "accepted". Poll until the job leaves the queue, otherwise a failed index run would
+          # show up here as a passing workflow.
+          DEADLINE=$(( $(date +%s) + 60*25 ))
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            sleep 15
+            STATUS=$(curl -fsS --max-time 30 "http://127.0.0.1:8788/status" || true)
+            [ -n "$STATUS" ] || continue
+            # One line on purpose: an indented multi-line script inside a YAML block scalar is
+            # either invalid YAML or invalid Python, never both valid.
+            STATE=$(printf '%s' "$STATUS" | JOB="$JOB" python3 -c 'import json,os,sys; hits=[r for r in json.load(sys.stdin).get("recent",[]) if r.get("id")==os.environ["JOB"]]; print(hits[0]["state"] if hits else "pending")' || echo pending)
+            case "$STATE" in
+              ok)
+                echo "indexed $REPO@$REF $SHA" >> "$GITHUB_STEP_SUMMARY"
+                exit 0 ;;
+              failed)
+                printf '%s\n' "$STATUS" >&2
+                echo "::error::index run $JOB failed on the VM — see journalctl -u ckg-index"
+                exit 1 ;;
+            esac
+          done
+
+          # The job is still on the VM's queue and will finish there; failing the workflow now
+          # would only be noise. Surface it and move on.
+          echo "::warning::index run $JOB still running after 25 min — check GET /status on the VM"
