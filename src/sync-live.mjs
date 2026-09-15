@@ -101,6 +101,8 @@ async function pass() {
   }
   try { const ci = await refreshConfigIndex(); if (ci.embedded || ci.removed) out.push({ name: "config_index", changed: ci.embedded, removed: ci.removed, total: ci.indexed }); }
   catch (e) { out.push({ name: "config_index", error: String(e.message).slice(0, 120) }); }
+  try { const li = await refreshLiveIndex(); if (li.embedded) out.push({ name: "search_index", changed: li.embedded, total: li.indexed }); }
+  catch (e) { out.push({ name: "search_index", error: String(e.message).slice(0, 120) }); }
   const line = out.map(r => r.error ? `${r.name}: ERROR ${r.error}` : `${r.name}: ${r.changed} changed${r.removed ? `, ${r.removed} removed` : ""}, ${r.total} rows${r.full ? " (full)" : ""}`).join(" | ");
   console.log(`${new Date().toISOString()} live sync ${Date.now() - t0}ms  ${line}`);
   return out;
@@ -144,4 +146,45 @@ export async function refreshConfigIndex() {
   const gone = [...have.keys()].filter(k => !want.some(w => w.key === k));
   if (gone.length) await q(`delete from live.config_index where config_key = any($1::text[])`, [gone]);
   return { indexed: want.length, embedded: todo.length, removed: gone.length };
+}
+
+// ---------------------------------------------------------------------------------------------------
+// LIVE SEARCH INDEX. Every mirrored thing that has a human name -- templates, approval flows, datasources,
+// environment switches -- is searchable by MEANING, so "logistics auction templates" or "the approval flow for
+// invoices above 5 lakh" resolves to real rows without the planner guessing substrings. Content-addressed.
+// ---------------------------------------------------------------------------------------------------
+const LIVE_INDEX_SOURCES = {
+  templates:       { sql: `select id, company_id, name || ' (template' || coalesce(' type ' || template_type::text, '') || coalesce(', order type ' || order_type::text, '') || ')' as text from live.templates where name is not null` },
+  approval_flows:  { sql: `select id, company_id, coalesce(name,'') || ' — approval flow for ' || coalesce(approval_key,'') || coalesce('. ' || description, '') as text from live.approval_flows` },
+  fx_datasources:  { sql: `select id, tenant_id as company_id, name || ' (flexi datasource)' as text from live.fx_datasources where name is not null` },
+  procol_variables:{ sql: `select id, null::int as company_id, key || ' (environment variable)' as text from live.procol_variables` },
+};
+export async function refreshLiveIndex() {
+  const { embed, embedModelId, toPgVector } = await import("./service/embed.mjs");
+  const { createHash } = await import("node:crypto");
+  const model = embedModelId();
+  await q(`create table if not exists live.search_index (
+             kind text not null, ref_id bigint not null, company_id bigint, text text not null, hash text not null, model text, embedding vector,
+             refreshed_at timestamptz default now(), primary key (kind, ref_id))`);
+  await q(`grant select on live.search_index to ckg_reader`).catch(() => {});
+  let embedded = 0, total = 0;
+  for (const [kind, src] of Object.entries(LIVE_INDEX_SOURCES)) {
+    const rows = await q(src.sql);
+    total += rows.length;
+    const have = new Map((await q(`select ref_id, hash, model from live.search_index where kind=$1`, [kind])).map(r => [String(r.ref_id), r]));
+    const todo = rows.map(r => ({ ...r, hash: createHash("sha1").update(r.text).digest("hex") })).filter(r => { const e = have.get(String(r.id)); return !e || e.hash !== r.hash || e.model !== model; });
+    for (let i = 0; i < todo.length; i += 128) {
+      const b = todo.slice(i, i + 128);
+      const vecs = await embed(b.map(r => r.text.slice(0, 500)));
+      const vals = b.map((_, j) => `($1, $${j * 6 + 2}, $${j * 6 + 3}, $${j * 6 + 4}, $${j * 6 + 5}, $${j * 6 + 6}, $${j * 6 + 7}::vector)`).join(",");
+      await q(`insert into live.search_index (kind, ref_id, company_id, text, hash, model, embedding) values ${vals}
+               on conflict (kind, ref_id) do update set text=excluded.text, hash=excluded.hash, model=excluded.model, embedding=excluded.embedding, company_id=excluded.company_id, refreshed_at=now()`,
+              [kind, ...b.flatMap((r, j) => [r.id, r.company_id, r.text, r.hash, model, toPgVector(vecs[j])])]);
+      embedded += b.length;
+    }
+    const ids = new Set(rows.map(r => String(r.id)));
+    const gone = [...have.keys()].filter(k => !ids.has(k));
+    if (gone.length) await q(`delete from live.search_index where kind=$1 and ref_id = any($2::bigint[])`, [kind, gone]);
+  }
+  return { indexed: total, embedded };
 }

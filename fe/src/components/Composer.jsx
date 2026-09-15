@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
  * The question pill. Glass over the constellation, a rotating gradient hairline while focused or
  * busy, and a soft spotlight that follows the pointer. `/` focuses it from anywhere; Esc stops.
  */
-export default function Composer({ onSend, onStop, asking, disabled, autoFocus, inputRef }) {
+export default function Composer({ onSend, onStop, asking, disabled, autoFocus, inputRef, placeholder = "Ask about a file, an endpoint or a flow" }) {
   const [value, setValue] = useState("");
   const [focused, setFocused] = useState(false);
   const localRef = useRef(null);
@@ -49,7 +49,7 @@ export default function Composer({ onSend, onStop, asking, disabled, autoFocus, 
           rows={1}
           value={value}
           disabled={disabled}
-          placeholder={asking ? "Reading the graph…" : "Ask about a file, an endpoint or a flow"}
+          placeholder={asking ? "Reading the graph…" : placeholder}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={onKeyDown}
           onFocus={() => setFocused(true)}

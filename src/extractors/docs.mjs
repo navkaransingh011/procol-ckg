@@ -69,11 +69,22 @@ export function mentions(text) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 80).map(([k, n]) => ({ key: k, n }));
 }
 
+/** Optional YAML front matter: feature, jira, prd, owner, status, tags. Ties a doc to a feature without guessing. */
+export function frontMatter(text) {
+  const m = text.match(/^---\n([\s\S]*?)\n---\n/);
+  if (!m) return { meta: {}, body: text };
+  const meta = {};
+  for (const line of m[1].split("\n")) { const kv = line.match(/^([A-Za-z_][\w-]*):\s*(.*)$/); if (kv) meta[kv[1].toLowerCase()] = kv[2].replace(/^["']|["']$/g, "").trim(); }
+  if (meta.tags) meta.tags = meta.tags.replace(/^\[|\]$/g, "").split(",").map(t => t.trim()).filter(Boolean);
+  return { meta, body: text.slice(m[0].length) };
+}
+
 export function extract(buf, p) {
-  const text = buf.toString("utf8");
-  const title = (text.match(/^#\s+(.+?)\s*$/m)?.[1] || p.split("/").pop().replace(/\.[^.]+$/, "")).replace(/[*_`]/g, "").trim();
+  const raw = buf.toString("utf8");
+  const { meta, body: text } = frontMatter(raw);
+  const title = (meta.title || text.match(/^#\s+(.+?)\s*$/m)?.[1] || p.split("/").pop().replace(/\.[^.]+$/, "")).replace(/[*_`]/g, "").trim();
   const chunks = chunk(text);
-  return { schema: 1, title, words: words(text), chunks, mentions: mentions(text) };
+  return { schema: 1, title, words: words(text), chunks, mentions: mentions(text), meta };
 }
 
 export function resolve(facts, file, ctx) {
@@ -82,8 +93,9 @@ export function resolve(facts, file, ctx) {
   const fqn = `doc:${file.path}`;
   entities.push({ fqn, kind: "DOCUMENT", name: facts.title, path: file.path, blobSha: file.blobSha,
                   startLine: 1, endLine: null,
-                  attrs: { subkind: file.path.split("/")[0] === "docs" ? "design_doc" : /readme/i.test(file.path) ? "readme" : /ai-review/.test(file.path) ? "scenarios" : "doc",
-                           chunks: facts.chunks.length, words: facts.words, headings: facts.chunks.map(c => c.heading_path).filter((h, i, a) => h && a.indexOf(h) === i).slice(0, 30) },
+                  attrs: { subkind: /^docs\/prd\//.test(file.path) || facts.meta?.prd ? "prd" : file.path.split("/")[0] === "docs" ? "design_doc" : /readme/i.test(file.path) ? "readme" : /ai-review/.test(file.path) ? "scenarios" : "doc",
+                           chunks: facts.chunks.length, words: facts.words, headings: facts.chunks.map(c => c.heading_path).filter((h, i, a) => h && a.indexOf(h) === i).slice(0, 30),
+                           ...(facts.meta && Object.keys(facts.meta).length ? { meta: facts.meta, tags: facts.meta.tags || undefined, feature: facts.meta.feature || undefined, owner: facts.meta.owner || undefined, status: facts.meta.status || undefined } : {}) },
                   status: "OBSERVED", extractor: `${NAME}@${VERSION}`, confidence: 1.0, resolution: "DOCUMENTED" });
   // MENTIONS: doc -> the code it names. Targets that do not exist in this commit are dropped at load time.
   for (const { key, n } of facts.mentions || []) {

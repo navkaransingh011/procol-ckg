@@ -3,7 +3,8 @@
 // The model's job here is small and bounded: pick tools, then write prose over
 // structured results it cannot edit. It never sees source code and never invents
 // a fact. Everything it can cite came from a deterministic extractor.
-import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, semanticAnchor, searchDocs, queryLive, searchConfigs, LIVE_DOC, NARRATIVE_EDGES } from "../tools.mjs";
+import { redactFacts } from "./policy.mjs";
+import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, semanticAnchor, searchDocs, queryLive, searchConfigs, searchLive, LIVE_DOC, NARRATIVE_EDGES } from "../tools.mjs";
 import { q } from "../db.mjs";
 import { createHash } from "node:crypto";
 import { runSql, SCHEMA_DOC } from "../sqltool.mjs";
@@ -79,11 +80,13 @@ const norm = (s) => String(s || "").toLowerCase().replace(/[^\p{L}\p{N}#./:_-]+/
  * Cache in front of the real run. Key = question (normalised) + style + the exact commits in scope, so a
  * re-index misses on its own. Replays the stored event stream in ~ms with one leading status line.
  */
-export async function ask({ question, refs = ["main"], emit, style = "auto", fresh = false }) {
+export async function ask({ question, refs = ["main"], emit, style = "auto", fresh = false, policy = null }) {
   const p0 = provider();
-  if (p0.mock || fresh || process.env.CKG_ANSWER_CACHE === "0") return askUncached({ question, refs, emit, style });
+  if (p0.mock || fresh || process.env.CKG_ANSWER_CACHE === "0") return askUncached({ question, refs, emit, style, policy });
   const { commits } = await resolveScope(refs);
-  const key = createHash("sha1").update(`${norm(question)}|${style}|${[...commits].sort().join(",")}`).digest("hex");
+  // the role is part of the key: an engineer's cached answer (with paths) must never replay for a CS user
+  const view = policy ? JSON.stringify(policy) : "open";
+  const key = createHash("sha1").update(`${norm(question)}|${style}|${view}|${[...commits].sort().join(",")}`).digest("hex");
   const hit = await q(`update ckg.answer_cache set hits = hits + 1, last_hit = now() where key = $1 returning events, created_at, ms`, [key]).catch(() => []);
   if (hit.length) {
     const age = Math.round((Date.now() - new Date(hit[0].created_at).getTime()) / 60000);
@@ -94,14 +97,14 @@ export async function ask({ question, refs = ["main"], emit, style = "auto", fre
   }
   const events = [];
   const rec = (e) => { emit(e); if (e.type !== "status") events.push(e); };   // status lines are transient by design
-  const summary = await askUncached({ question, refs, emit: rec, style });
+  const summary = await askUncached({ question, refs, emit: rec, style, policy });
   if (summary && !events.some(e => e.type === "error") && events.some(e => e.type === "token"))
     await q(`insert into ckg.answer_cache (key, question, style, commits, events, ms) values ($1,$2,$3,$4,$5,$6) on conflict (key) do nothing`,
             [key, question, style, commits, JSON.stringify(events), summary.ms ?? null]).catch(() => {});
   return summary;
 }
 
-async function askUncached({ question, refs = ["main"], emit, style = "auto" }) {
+async function askUncached({ question, refs = ["main"], emit, style = "auto", policy = null }) {
   const t0 = Date.now();
   const p = provider();
   const collectedEvidence = new Map();
@@ -112,9 +115,9 @@ async function askUncached({ question, refs = ["main"], emit, style = "auto" }) 
 
   if (p.mock) return mockRun({ question, refs, emit, t0 });
   if (mode() === "sql") return sqlRun({ question, refs, emit, t0, p });
-  if (mode() === "auto") return routeAuto({ question, refs, emit, t0, p, intent });
-  if (mode() === "plan") return planRun({ question, refs, emit, t0, p, intent });
-  if (mode() === "guided") return guidedRun({ question, refs, emit, t0, p, intent });
+  if (mode() === "auto") return routeAuto({ question, refs, emit, t0, p, intent, policy });
+  if (mode() === "plan") return planRun({ question, refs, emit, t0, p, intent, policy });
+  if (mode() === "guided") return guidedRun({ question, refs, emit, t0, p, intent, policy });
 
   const messages = [
     { role: "system", content: SYSTEM },
@@ -334,7 +337,7 @@ export async function anchor(question, refs) {
  * because the gaps are computed here and emitted before it is asked anything.
  * The model's only job is turning structured facts into a readable paragraph.
  */
-async function guidedRun({ question, refs, emit, t0, p, intent = "code" }) {
+async function guidedRun({ question, refs, emit, t0, p, intent = "code", policy = null }) {
   emit({ type: "status", text: "searching the code graph" });
 
   // 1. anchor
@@ -464,7 +467,7 @@ STRICT RULES
 - ${facts.documents.length ? "8" : "6"} sentences maximum. No preamble, no bullet lists.
 
 FACTS
-${JSON.stringify(facts, null, 1).slice(0, 12000)}`;
+${JSON.stringify(policy ? redactFacts(facts, policy) : facts, null, 1).slice(0, 12000)}`;
 
   emit({ type: "status", text: `writing the ${intent === "simple" ? "plain-English" : ""} answer (${p.model})`.replace("  ", " ") });
   const guidedSystem = intent === "simple"
@@ -645,6 +648,8 @@ LIVE PLATFORM DATA -- the CURRENT configuration, from a read-only mirror of the 
   describe what is in the table (groups, notable rows, patterns), and say "see the table below".
 - "live_config_greps" show where the CODE reads a config_key that came back from live data -- this is the join
   between configuration and behaviour. Use it: "X is on for <company> (as of ...), and the code checks it in <file:line>".
+- "live_candidates" are platform rows (templates, approval flows, datasources) closest in meaning to the question,
+  with the company they belong to. Use them to name the actual template/flow the question is about.
 - "config_candidates" are the configuration switches closest IN MEANING to the question (key, human name, description,
   default, how many companies have an override on). When the question asks "which config / what is the setting for X",
   answer with the top candidate by key AND human name, its default, who has it on, and where the code reads it
@@ -858,13 +863,13 @@ function emitContextPaths(factsJson, emit) {
   if (paths.size) emit({ type: "context_paths", paths: [...paths].slice(0, 400) });
 }
 
-async function routeAuto({ question, refs, emit, t0, p, intent }) {
+async function routeAuto({ question, refs, emit, t0, p, intent, policy = null }) {
   const a = await anchor(question, refs);
   const exactIdent = !!a.seed && !a.weak && IDENTIFIER_RE.test(a.token || "");
   // Fast path only for a code-intent, exact-identifier, non-"why" question.
   if (intent === "code" && exactIdent && !isOverview(question) && !THOUGHT_RE.test(question))
-    return guidedRun({ question, refs, emit, t0, p, intent });
-  return planRun({ question, refs, emit, t0, p, intent });
+    return guidedRun({ question, refs, emit, t0, p, intent, policy });
+  return planRun({ question, refs, emit, t0, p, intent, policy });
 }
 
 const PLAN_LOOKUPS = 6, PLAN_TOTAL_LOOKUPS = 8, PLAN_LISTS = 3, LIST_LIMIT = 40, FACTS_BUDGET = 30000;
@@ -923,6 +928,7 @@ async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYST
  * column ("$companies.id") wait for that table's rows and are expanded to the ids found (cap 50). This lets
  * "approval flows for Reliance" resolve company -> flows without a second model call.
  */
+const LIVE_TABLES_KEY = { templates: "id", approval_flows: "id", fx_datasources: "id", procol_variables: "id" };
 async function runLivePlan(specs, question = "") {
   const list = (specs || []).filter(x => x && typeof x.table === "string").slice(0, 4).map(x => {
     // "master config(s)" is the catalogue table; the overrides table only answers "which companies have X on".
@@ -975,7 +981,8 @@ async function completeSets(question, results) {
   }));
 }
 
-async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
+async function planRun({ question, refs, emit, t0, p, intent = "code", policy = null }) {
+  const canSource = !policy || policy.code_source;      // restricted roles never read or grep source
   // Phase 0: candidates by MEANING. Fails soft when no embeddings exist. The pilot measured this as the
   // difference between 5/8 and 7/8 on questions asked in everyday words.
   let sem = [];
@@ -983,14 +990,22 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
   // Configuration questions: find the switch by MEANING over the live catalogue before planning, so the
   // planner works from real keys ("fx_response_sequence_advisory_lock_enabled") instead of guessing substrings.
   const CONFIG_RE = /\b(config(uration)?s?|setting|switch|flag|toggle|enabled?|disabled?|turn(ed)? (on|off)|lock|master config|custom config|default value|feature (on|off))\b/i;
-  let configs = [];
-  if (CONFIG_RE.test(question)) {
-    try { configs = (await searchConfigs({ question, k: 6, min_score: 0.55 })).configs; } catch { /* no live mirror */ }
-    if (configs.length) emit({ type: "status", text: `configuration switches by meaning: ${configs.slice(0, 3).map(c => c.config_key).join(" · ")}` });
-  }
+  // The live layer is searched by meaning on EVERY question (~10 ms each): the config catalogue, and the names of
+  // templates, approval flows, datasources and environment switches. Thresholds keep unrelated rows out.
+  let configs = [], liveHits = [];
+  const [cfgRes, liveRes0] = await Promise.all([
+    searchConfigs({ question, k: 6, min_score: CONFIG_RE.test(question) ? 0.55 : 0.62 }).catch(() => ({ configs: [] })),
+    searchLive({ question, k: 6, min_score: 0.6 }).catch(() => ({ hits: [] })),
+  ]);
+  configs = cfgRes.configs || []; liveHits = liveRes0.hits || [];
+  if (configs.length) emit({ type: "status", text: `configuration switches by meaning: ${configs.slice(0, 3).map(c => c.config_key).join(" · ")}` });
+  if (liveHits.length) emit({ type: "status", text: `live rows by meaning: ${liveHits.slice(0, 3).map(h => `${h.kind}#${h.ref_id} ${h.text.slice(0, 40)}`).join(" · ")}` });
   const candText = (sem.length
     ? "\n\nCANDIDATE NODES (real graph names ranked by meaning; use their exact names as lookups when they fit):\n"
       + sem.map(m => `- ${m.kind} | ${m.name || m.fqn} | ${m.path || ""}`).join("\n")
+    : "") + (liveHits.length
+    ? "\n\nCANDIDATE LIVE ROWS (real rows from the platform mirror, ranked by meaning; query them by id with where{} instead of guessing names):\n"
+      + liveHits.map(h => `- ${h.kind} id=${h.ref_id}${h.company ? ` | company ${h.company}` : ""} | ${h.text.slice(0, 90)}`).join("\n")
     : "") + (configs.length
     ? "\n\nCANDIDATE CONFIGS (real config_keys from the live catalogue, ranked by meaning -- use these exact keys in live where{} filters; do not guess substrings):\n"
       + configs.map(c => `- ${c.config_key} | "${c.name || ""}" | default ${JSON.stringify(c.defaults)} | on for ${c.companies_active} companies`).join("\n")
@@ -1035,7 +1050,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
     Promise.all(sqlStmts.map(stmt => runSql({ sql: stmt }).then(r => ({ stmt, r })))),
     Promise.all(prefs.map(pref => endpointFamily({ path_prefix: pref, refs }))),
     attachDocuments({ question, refs, emit, seen, k: 6, min_score: 0.45 }),   // what the DOCS say, next to what the code does
-    runLivePlan(plan?.live, question),                                         // what is switched ON right now (UAT mirror)
+    runLivePlan((plan?.live && plan.live.length) ? plan.live : liveHits.length ? [...new Set(liveHits.map(h => h.kind))].slice(0, 2).map(kind => ({ table: kind, where: { [ (LIVE_TABLES_KEY[kind] || "id") ]: liveHits.filter(h => h.kind === kind).map(h => String(h.ref_id)) }, limit: 50 })) : [], question),   // live rows: the planner's, else the candidates found by meaning
   ]);
   const documents = docRes;
   const live = await completeSets(question, liveRes.filter(Boolean));
@@ -1075,7 +1090,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
   // three-way join: any config_key that came back from live data -> where the CODE reads it (repo-wide grep)
   const liveKeys = [...new Set([...configs.slice(0, 2).map(c => c.config_key), ...live.flatMap(l => (l.rows || []).map(r => r.config_key).filter(Boolean))])].slice(0, 3);
   const liveGreps = [];
-  for (const k of liveKeys) { const g = await grepSource({ repo: "procol-backend", pattern: k, refs, max_hits: 10, context: 4 }).catch(() => null); if (g && !g.error && g.total_hits) liveGreps.push(g); }
+  for (const k of canSource ? liveKeys : []) { const g = await grepSource({ repo: "procol-backend", pattern: k, refs, max_hits: 10, context: 4 }).catch(() => null); if (g && !g.error && g.total_hits) liveGreps.push(g); }
   if (liveGreps.length) emit({ type: "status", text: `where the code reads ${liveKeys.join(", ")}: ${liveGreps.reduce((a, g) => a + g.total_hits, 0)} places` });
   const matched = results.filter(r => r.match !== "none").length;
   emit({ type: "status", text: `${matched}/${results.length} lookups matched a node` });
@@ -1107,7 +1122,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
   const SOURCE_CAP = 14000;
   const pushSrc = (blk) => { if (!blk || blk.error) return; const size = JSON.stringify(blk).length; if (sourceChars + size > SOURCE_CAP) return; source.push(blk); sourceChars += size; };
   const identTokens = candidates(question).filter(t => /[#.?!:_]|[a-z][A-Z]/.test(t)).slice(0, 5);
-  if (plan?.want_source || identTokens.length) {
+  if (canSource && (plan?.want_source || identTokens.length)) {
     emit({ type: "status", text: "reading source at the indexed commit" });
     const seenFiles = new Set();
     await Promise.all(results.map(async (r) => {
@@ -1129,7 +1144,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
 
   // REPO-WIDE GREPS -- only when the plan asked to read code; they are the slowest step.
   const greps = [];
-  if (plan?.want_source) {
+  if (canSource && plan?.want_source) {
     const planGreps = (plan?.greps || []).filter(g => typeof g === "string" && g.length >= 3).slice(0, 3);
     const grepRepos = new Set(results.map(r => r.anchor?.repo).filter(Boolean));
     if (!grepRepos.size) grepRepos.add("procol-backend");
@@ -1178,6 +1193,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
                   ...(source.length ? { source } : {}), ...(greps.length ? { greps } : {}),
                   ...(documents.length ? { documents } : {}),
                   ...(live.length ? { live } : {}), ...(liveGreps.length ? { live_config_greps: liveGreps } : {}),
+                  ...(liveHits.length ? { live_candidates: liveHits.map(h => ({ table: h.kind, id: h.ref_id, company: h.company, text: h.text, match_score: h.score })) } : {}),
                   ...(configs.length ? { config_candidates: configs.map(c => ({ config_key: c.config_key, name: c.name, description: c.description, default: c.defaults, item_type: c.item_type,
                                                                               overrides: c.overrides, companies_with_it_on: c.companies_active, match_score: c.score })) } : {}),
                   ...(summaries ? { overviews: summaries } : {}), ...(owners ? { owners } : {}) };
@@ -1187,7 +1203,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code" }) {
   emitContextPaths(JSON.stringify(facts), emit);
   emit({ type: "status", text: `writing the ${intent === "simple" ? "plain-English" : "technical"} answer (${p.model})` });
   const tAnswer = Date.now();
-  await writeAnswer({ question, facts, emit, budget: FACTS_BUDGET, system: intent === "simple" ? ANSWER_SIMPLE_SYSTEM : ANSWER_SYSTEM });
+  await writeAnswer({ question, facts: policy ? redactFacts(facts, policy) : facts, emit, budget: FACTS_BUDGET, system: intent === "simple" ? ANSWER_SIMPLE_SYSTEM : ANSWER_SYSTEM });
   const answerMs = Date.now() - tAnswer;
   await emitRefsFooter(refs, emit);
 

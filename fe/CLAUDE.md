@@ -14,8 +14,13 @@ supplier side). The graph lives in Postgres; a Node service answers questions; t
 It is deliberately **not** inside the client dashboard. It is a standalone page, served by the same
 Node process as the API in production (one origin, one port).
 
-Status: works end to end on a laptop and on a GCP VM (`procol-ckg`, asia-south1-c). Login is still
-"dev mode" (anyone who reaches the port gets answers) — do not design as if auth exists yet.
+Status: works end to end on a laptop and on a GCP VM (`procol-ckg`, asia-south1-c). **Sign-in and roles
+exist** (13 Sept 2026): `src/components/Login.jsx` is the door; the session is an HttpOnly cookie set by the
+service, so the UI never holds a token. `useAgent().me` is `undefined` (checking), `null` (signed out) or
+`{email, name, picture, role, label, via, can:{code_names,endpoints,paths,code_source,refs}}`. The role
+decides the answer style and what the stream contains; the old Auto/Simple/Code toggle is gone. Use `me.can`
+only to hide UI that would be empty (e.g. a trace for a role with no code nodes), never as a guard: the
+server already filtered the events. Roles: `config/roles.json`; accounts: `npm run users -- add <email> <role>` / `seed-demo`.
 
 ## 2. Repo map (the parts that matter to you)
 
@@ -28,11 +33,20 @@ procol-ckg/
     src/App.jsx          layout: header (brand, Auto/Simple/Code toggle, branch picker, New question),
                          stage (hero, composer, suggestions | history chips, active turn), footer meta
     src/useAgent.js      ALL state: health, refs, selectedRef, style, turns[], active, asking; ask/stop/reset
-    src/api.js           getHealth, getRefs, askStream (fetch + ReadableStream over SSE; NOT EventSource)
+    src/api.js           getHealth, getRefs, getAuthConfig, getMe, login(email,password), logout, askStream
+                         (fetch + ReadableStream over SSE, credentials: include; NOT EventSource)
+    src/components/Login.jsx      the sign-in card: email + password (accounts are created by `npm run users -- add`;
+                         Google sign-in is deferred until the VM has a hostname with TLS)
+    src/components/IconField.jsx  procurement line icons (gavel, PO, truck, approval, rupee...) drifting in alternating
+                         columns above the bar and dissolving at it; pure CSS motion, fades out when a turn is live.
+                         App.jsx measures the bar and sets --bar-y so the fade lands exactly on it.
+    src/components/Background.jsx the graph constellation canvas, now at .55 opacity under the icon field
     src/components/Composer.jsx   the centered input pill: autosize, Enter=send, Shift+Enter=newline, stop button, progress sweep
     src/components/Answer.jsx     status line, prose, TracePath, "Where the trail stops", truncated note, error, receipt
     src/components/TracePath.jsx  the execution path drawn as coloured nodes joined by labelled connectors
-    src/styles.css       design tokens (light + dark), every component style
+    src/styles.css       design tokens (light + dark), every component style. Type: Geist (UI), Instrument Serif
+                         (headline only, italic accent word), Geist Mono (code); loaded from Google Fonts in index.html
+                         with system fallbacks. Keep the serif to the hero; everything else is the sans.
   src/service/server.mjs   the API + static server (serves fe/dist at / in production)
   src/service/agent.mjs    the answering logic (you will not edit this, but see §5 for what it emits)
   docs/API_CONTRACT.md     the original contract; §5 below is the up-to-date superset

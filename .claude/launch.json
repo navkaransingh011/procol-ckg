@@ -1,0 +1,26 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ckg-fe",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--prefix",
+        "/Users/udaykumar/Documents/project/procol-ckg/fe"
+      ],
+      "port": 5173
+    },
+    {
+      "name": "ckg-api",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "--env-file=/Users/udaykumar/Documents/project/procol-ckg/.env",
+        "/Users/udaykumar/Documents/project/procol-ckg/src/service/server.mjs"
+      ],
+      "port": 8787,
+      "autoPort": false
+    }
+  ]
+}

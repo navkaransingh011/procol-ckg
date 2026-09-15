@@ -225,10 +225,17 @@ schema `live` of our own Postgres, so answers can join **what the docs intend**,
   flexi PO transactions cannot run together" resolves to `fx_response_sequence_advisory_lock_enabled` without
   anyone guessing the key; the planner receives these CANDIDATE CONFIGS before it plans. Set questions use JSON
   filters (`contains: {"defaults": {"value": true}}`), and the SQL step knows the live schema.
+- **Every named live row is searchable by meaning.** `live.search_index` embeds templates, approval flows, flexi
+  datasources and environment switches (27.8k rows, refreshed by the poller, content-addressed). With the config
+  catalogue index this makes the live layer semantic like code and documents: all three layers are searched on every
+  question, and their best matches reach the planner as candidates (CANDIDATE NODES / CONFIGS / LIVE ROWS).
+- **A PRD can ship with a commit.** `ingest-doc.mjs --commit <sha> --repo <name> --files ...` (or `--repo-dir`) stores a
+  document AT that commit with `DESCRIBES` edges to every node in the files it changed; in-repo `docs/prd/**` with YAML
+  front matter does the same automatically on index. See docs/DOCS_INGEST.md and docs/PR_TEMPLATE_SNIPPET.md.
 - **Lists are tables, shaped by the question.** Any live result with more than a few rows is sent to the UI as an exact
   table (all rows, sync time, filter, copy) and the prose only summarises it. Columns follow the wording: "what are the
   configs" shows key + name; add "status"/"on" for status, "describe" for descriptions, "details" for everything; the
-  filter column itself is never shown. "all / every / list / how many" fetch the whole set (up to 200).
+  filter column itself is never shown. "all / every / list / how many" fetch the whole set (up to 500).
 - Any `config_key` that comes back (candidate or row) is grepped in the backend, with context, so the answer
   can say where the code reads it and what it does there.
 - `.env` needs `LIVE_DATABASE_URL` (a UAT connection; use `sslmode=no-verify`, the cert is self-signed) and

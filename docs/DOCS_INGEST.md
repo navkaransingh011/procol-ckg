@@ -56,6 +56,43 @@ Also: `--list` shows everything uploaded; `--delete <slug>` removes one.
   when a doc and the code disagree.
 - **Skip** meeting notes, chat exports, and changelogs. They add noise, not rules.
 
+## Shipping a PRD with the code (commit / PR attached documents)
+
+A document can belong to a specific commit, linked to **exactly the files that commit changed** (by diff, not by
+guessing names). That is how the business logic of a feature travels with the code that implements it.
+
+Three ways to get the PRD in, from most to least automatic:
+
+1. **In the repo, with the feature.** Put it at `docs/prd/<feature>.md` in the same PR. The indexer picks it up on
+   merge as a `prd` document of that commit and links every identifier it names. Optional YAML front matter ties it
+   to a feature without guessing:
+   ```
+   ---
+   title: Clara chatbot sessions
+   feature: clara
+   jira: PROC-4312
+   owner: Product
+   status: shipped
+   tags: clara, sessions, auth
+   prd: https://www.notion.so/procol/...
+   ---
+   ```
+2. **In the PR description.** Use the block in `docs/PR_TEMPLATE_SNIPPET.md`. When the reindex job runs on merge it
+   stores the PR's business-context section as a document of that commit and links it to the changed files
+   (`DESCRIBES` edges). *(Automation lands with the CI reindex job; until then use option 3.)*
+3. **By hand, after the fact:**
+   ```
+   node --env-file=.env src/ingest-doc.mjs --file prd.md --repo procol-backend --commit <sha> \
+        --files app/models/session.rb,app/services/clara/auth.rb --pr 4312 --url <pr or prd url>
+   ```
+   `--files` is the list the commit changed; with a clone available use `--repo-dir ../procol-backend` instead and
+   the list is read from git. The commit must already be indexed. Remove one with `--delete doc:commit/<sha12>/<slug>`.
+
+What the agent then does: for a question about that feature it finds the PRD by meaning, sees which code it
+describes, and answers "the rule says X, the code does Y, they agree / conflict", citing both. Verified on a sample
+PRD attached to backend main: 96 nodes across 3 changed files linked, and the question "why must a Clara token never
+log the user out, and does the code do that?" answered from PRD + code in 9 seconds.
+
 ## Batch
 
 ```bash
