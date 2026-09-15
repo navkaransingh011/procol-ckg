@@ -23,11 +23,11 @@ export function allowedRefs(p, refs) {
 }
 
 // Node kinds that are business-facing, never code. Anything else with a `kind` is treated as code.
-const NON_CODE = new Set(["DOCUMENT", "FEATURE", "CONFIG", "CONFIGURATION", "PERSON", "TEAM", "OWNER", "CONCEPT", "COMPANY",
+const NON_CODE = new Set(["DOCUMENT", "FEATURE", "CONFIG", "CONFIGURATION", "PERSON", "TEAM", "OWNER", "CONCEPT", "COMPANY", "UI_ROUTE", "UI_ACTION",
                           "TEMPLATE", "APPROVAL_FLOW", "DATASOURCE", "VARIABLE", "SUMMARY", "OVERVIEW"]);
 const ENDPOINT_KINDS = new Set(["ENDPOINT", "ROUTE", "HTTP_CALL_SITE", "HTTP_ENDPOINT", "API"]);
 const PATH_KEYS = new Set(["path", "line", "start_line", "end_line", "blob_sha", "file", "paths", "site", "scope"]);
-const PATH_RE = /`?(?:[\w.-]+\/)+[\w.-]+\.(?:rb|js|jsx|ts|tsx|mjs|erb|yml|yaml|rake|json|sql)(?::\d+(?:-\d+)?)?`?/g;
+const PATH_RE = /`?(?:[\w.-]+\/)+[\w.-]+\.(?:yaml|rake|json|jsx|tsx|mjs|erb|yml|sql|rb|js|ts)(?::\d+(?:-\d+)?)?`?/g;
 
 function hidesKind(kind, p) {
   if (NON_CODE.has(kind)) return false;
@@ -78,6 +78,8 @@ export function filterEvent(ev, p) {
       if (!p.code_names && !(p.endpoints && ev.kind && ENDPOINT_KINDS.has(ev.kind))) return null;
       return redact(ev, p);
     case "claim": return redact(ev, p) ?? null;
+    case "triage": return redact(ev, p);
+    case "flow": return p.code_names ? ev : { ...ev, steps: ev.steps.map((s) => (s.source === "code" || (s.ref && !["document", "config", "live"].includes(s.source))) ? { ...s, ref: null } : s) };
     case "token": case "status": case "unresolved": case "truncated": case "error": return redact(ev, p);
     default: return ev;   // intent, table (live platform rows are business data), done
   }

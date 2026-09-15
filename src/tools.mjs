@@ -7,6 +7,7 @@
 //   2. a hand-written join forgets `confidence >= x` and states a guess as fact;
 //   3. the model selects only the columns it thinks it needs, detaching provenance
 //      so nobody can check the answer.
+import { normalizeWidgets } from "./template-layout.mjs";
 import { q, hex } from "./db.mjs";
 import path from "node:path";
 
@@ -593,4 +594,137 @@ export async function searchLive({ question, k = 6, min_score = 0.5 }) {
        from live.search_index si left join live.companies c on c.id = si.company_id
       where si.model = $2 order by si.embedding <=> $1::vector limit $3`, [toPgVector(v), model, k]).catch(() => []);
   return { model, hits: rows.filter(r => Number(r.score) >= min_score).map(r => ({ ...r, score: Number(Number(r.score).toFixed(2)) })) };
+}
+
+
+// ---------------------------------------------------------------------------------------------------
+// TEMPLATE VIEW. A template as the dashboard shows it: the header row of widgets (columns) in display order,
+// with the labels people see (prefix, suffix, required, creator or participant side). Read-only mirror data.
+// ---------------------------------------------------------------------------------------------------
+const TEMPLATE_FOR = ["trade", "contract", "rfi", "module", "vendor", "allocation_summary", "custom_search"];
+const TEMPLATE_TYPE = ["default", "custom", "dynamic"];
+const INPUT_TYPE = ["number", "product", "dropdown", "percentage", "formula", "delivery_location", "quantity", "attachment", "string", "date"];
+export async function templateView({ id }) {
+  const tid = Number(id);
+  if (!Number.isInteger(tid)) return { error: "template id must be an integer" };
+  const [t] = await q(`select t.id, t.name, t.template_for, t.template_type, t.order_type, t.status, t.company_id, c.name as company, t.configurations, t.widgets, t.type_identifier, t.updated_at, t.synced_at
+                         from live.templates t left join live.companies c on c.id = t.company_id where t.id = $1`, [tid]).catch(() => []);
+  if (!t) return { error: `no template ${tid} in the mirror` };
+  let view = normalizeWidgets(t.widgets);
+  let source = "widgets_json";
+  if (view.layout === "empty") {                       // older templates: columns only through the mapping table
+    const ws = await q(`select w.name, w.key_attribute, w.input_type, w.widget_type, w.config
+                          from live.template_widget_mappings m join live.widgets w on w.id = m.widget_id
+                         where m.template_id = $1 and m.status = 1 order by (w.config->>'priority')::numeric nulls last, m.id`, [tid]).catch(() => []);
+    if (ws.length) {
+      view = normalizeWidgets({ inline_components: ws.map(w => ({ name: w.name, key_attribute: w.key_attribute, input_type: INPUT_TYPE[w.input_type] || String(w.input_type), widget_type: w.widget_type === 1 ? "custom" : "default", configuration: w.config || {} })) });
+      source = "widget_mappings";
+    }
+  }
+  const cfg = t.configurations || {};
+  return { id: t.id, name: t.name, template_for: TEMPLATE_FOR[t.template_for] || String(t.template_for), template_type: TEMPLATE_TYPE[t.template_type] || String(t.template_type),
+           order_type: t.order_type === 1 ? "sell" : "buy", status: t.status === 1 ? "active" : "inactive", company_id: t.company_id, company: t.company || null,
+           type_identifier: t.type_identifier || [], configurations: Object.fromEntries(Object.entries(cfg).filter(([, v]) => v !== null && typeof v !== "object")),
+           layout: view.layout, groups: view.groups, pages: view.pages, widget_count: view.count, source, updated_at: t.updated_at, as_of: t.synced_at };
+}
+
+
+// ---------------------------------------------------------------------------------------------------
+// SCREENS. A screen with what is on it and where it leads (fe-screens), and the navigation chain between
+// the screens a question is about -- the backbone of a "which screen, which button, then what" answer.
+// ---------------------------------------------------------------------------------------------------
+export async function screenView({ id, refs = ["main"] }) {
+  const { commits } = await resolveScope(refs);
+  const [s] = await q(`select e.id, e.name, e.attrs, rp.name repo from ckg.entities e join ckg.repos rp on rp.id=e.repo_id
+                        where e.id = $1 and e.kind = 'UI_ROUTE' and encode(e.commit_sha,'hex') = any($2::text[])`, [id, commits]).catch(() => []);
+  if (!s) return null;
+  const actions = await q(`select distinct on (lower(a.name), a.attrs->>'role') a.id, a.name, a.attrs->>'role' role, a.start_line from ckg.edges g join ckg.entities a on a.id = g.dst_entity_id
+                            where g.kind = 'DECLARES' and g.src_entity_id = $1 and a.kind = 'UI_ACTION' order by lower(a.name), a.attrs->>'role', a.start_line`, [s.id]);
+  actions.sort((x, y) => ({ step: 0, tab: 1, button: 2, menu: 3 }[x.role] ?? 4) - ({ step: 0, tab: 1, button: 2, menu: 3 }[y.role] ?? 4) || x.start_line - y.start_line);
+  const leads = await q(`select distinct t.id, t.name, t.attrs->>'route_path' route_path,
+                                (select string_agg(distinct a.name, ' / ') from ckg.edges ga join ckg.entities a on a.id = ga.src_entity_id
+                                   where ga.kind = 'NAVIGATES_TO' and ga.dst_entity_id = t.id and a.kind = 'UI_ACTION'
+                                     and exists (select 1 from ckg.edges d where d.kind = 'DECLARES' and d.src_entity_id = $1 and d.dst_entity_id = a.id)) via
+                           from ckg.edges g join ckg.entities t on t.id = g.dst_entity_id where g.kind = 'NAVIGATES_TO' and g.src_entity_id = $1 and t.kind = 'UI_ROUTE'`, [s.id]);
+  const apis = await q(`select distinct cs.attrs->>'method' method, cs.attrs->>'pathTemplate' path, h.name handler
+                          from ckg.edges g join ckg.entities cs on cs.id = g.dst_entity_id
+                          left join ckg.edges t on t.kind = 'TARGETS' and t.src_entity_id = cs.id
+                          left join ckg.edges sv on sv.kind = 'SERVES' and sv.dst_entity_id = t.dst_entity_id
+                          left join ckg.entities h on h.id = sv.src_entity_id and h.kind = 'HANDLER'
+                         where g.kind = 'ISSUES_HTTP' and g.src_entity_id = $1 limit 30`, [s.id]);
+  const a = s.attrs || {};
+  return { id: Number(s.id), screen: s.name, route_path: a.route_path, under: a.parents || [], also_known_as: a.keywords || [], app: s.repo,
+           actions: actions.map(x => ({ name: x.name, role: x.role })).slice(0, 40),
+           leads_to: leads.map(x => ({ screen: x.name, route_path: x.route_path, ...(x.via ? { via: x.via } : {}) })),
+           backend_apis: apis.filter(x => x.path).map(x => `${x.method || ""} ${x.path}${x.handler ? " -> " + x.handler : ""}`.trim()).slice(0, 20) };
+}
+
+/**
+ * The navigation chain that best connects the candidate screens: for every ordered pair, the shortest
+ * NAVIGATES_TO path (<= 6 hops); the pair whose path covers most candidates wins. Each hop names the click.
+ */
+/** Screens whose name or search keywords appear in the question, with the position of the first mention. */
+export async function screensNamedIn({ question, refs = ["main"] }) {
+  const { commits } = await resolveScope(refs);
+  const rows = await q(`select e.id, e.name, e.attrs->>'route_path' route_path, e.attrs->'keywords' keywords from ckg.entities e
+                         where e.kind = 'UI_ROUTE' and encode(e.commit_sha,'hex') = any($1::text[])`, [commits]);
+  const qn = " " + String(question).toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ") + " ";
+  const ALIASES = { "purchase requisition": ["purchase request", "purchase requests", "pr", "prs", "requisition"], "purchase orders": ["po", "pos", "purchase order"], "po form": ["po form", "purchase order form"],
+                    "events": ["event", "events", "rfq", "auction", "auctions"], "new event": ["create event", "create an event", "new event", "event creation"], "awarding": ["award", "awarding", "awarded"],
+                    "approvals": ["approval", "approvals", "approve"], "contracts": ["contract", "contracts"], "intake request": ["intake", "nfa"] };
+  const out = [];
+  for (const r of rows) {
+    if (/-flexi\s*$/.test(r.route_path || "") && /\b(purchase request|purchase order|contract|invoice|bill)\b/i.test(r.name)) continue;   // flexi module screens shadow the core ones by name
+    const names = [r.name.toLowerCase(), ...(Array.isArray(r.keywords) ? r.keywords.map(k => String(k).toLowerCase()) : []), ...(ALIASES[r.name.toLowerCase()] || [])];
+    let pos = -1;
+    for (const n of names) { const i = qn.indexOf(" " + n + " "); if (i >= 0 && (pos < 0 || i < pos)) pos = i; }
+    if (pos >= 0) out.push({ id: Number(r.id), name: r.name, route_path: r.route_path, pos });
+  }
+  // one screen per name: prefer the list/entry route (shortest path) over detail routes with params
+  const byName = new Map();
+  for (const o of out.sort((a, b) => (a.route_path.includes(":") ? 1 : 0) - (b.route_path.includes(":") ? 1 : 0) || a.route_path.length - b.route_path.length)) if (!byName.has(o.name)) byName.set(o.name, o);
+  return [...byName.values()].sort((a, b) => a.pos - b.pos);
+}
+
+export async function screenJourney({ candidateIds, refs = ["main"], from = null, to = null }) {
+  const ids = [...new Set([from, to, ...(candidateIds || [])].map(Number).filter(Number.isInteger))].slice(0, 8);
+  if (ids.length < 2) return null;
+  const { commits } = await resolveScope(refs);
+  const nav = await q(`select g.src_entity_id s, g.dst_entity_id d from ckg.edges g join ckg.entities a on a.id = g.src_entity_id join ckg.entities b on b.id = g.dst_entity_id
+                        where g.kind = 'NAVIGATES_TO' and a.kind = 'UI_ROUTE' and b.kind = 'UI_ROUTE' and encode(g.commit_sha,'hex') = any($1::text[])`, [commits]);
+  const adj = new Map();
+  for (const e of nav) { const s = Number(e.s), d = Number(e.d); if (!adj.has(s)) adj.set(s, new Set()); adj.get(s).add(d); }
+  const bfs = (from, to) => {
+    const prev = new Map([[from, null]]); const queue = [from];
+    while (queue.length) { const cur = queue.shift(); if (cur === to) break; for (const nx of adj.get(cur) || []) if (!prev.has(nx)) { prev.set(nx, cur); if (prev.size < 400) queue.push(nx); } }
+    if (!prev.has(to)) return null;
+    const path = []; for (let c = to; c !== null; c = prev.get(c)) path.unshift(c);
+    return path.length - 1 <= 6 ? path : null;
+  };
+  let best = null;
+  // the question's own order wins: start -> named intermediates -> end, leg by leg; a leg the code does not connect is skipped
+  if (from && to && from !== to) {
+    const end = Number(to);
+    const mids = ids.filter(x => x !== Number(from) && x !== end && bfs(x, end));       // only intermediates that can still reach the end
+    const path = [Number(from)]; let cur = Number(from);
+    for (const nxt of mids) { if (nxt === cur || path.includes(nxt)) continue; const leg = bfs(cur, nxt); if (leg && leg.length <= 4) { path.push(...leg.slice(1)); cur = nxt; } }
+    const last = bfs(cur, end); if (last) path.push(...last.slice(1));
+    if (path.length > 1 && path[path.length - 1] === end) best = { path, covered: path.filter(x => ids.includes(x)).length, directed: true };
+  }
+  if (!best) for (const a of ids) for (const b of ids) {
+    if (a === b) continue;
+    const p = bfs(a, b); if (!p) continue;
+    const covered = p.filter(x => ids.includes(x)).length;
+    if (!best || covered > best.covered || (covered === best.covered && p.length > best.path.length)) best = { path: p, covered };
+  }
+  if (!best) return null;
+  const screens = [];
+  for (const id of best.path) { const v = await screenView({ id, refs }); if (v) screens.push(v); }
+  const hops = [];
+  for (let i = 0; i + 1 < screens.length; i++) {
+    const to = screens[i].leads_to.find(l => l.screen === screens[i + 1].screen && l.route_path === screens[i + 1].route_path);
+    hops.push({ from: screens[i].screen, to: screens[i + 1].screen, click: to?.via || null });
+  }
+  return { screens: screens.map(s => ({ screen: s.screen, route_path: s.route_path, under: s.under, key_actions: s.actions.filter(a => a.role !== "title").map(a => a.name).slice(0, 18), backend_apis: s.backend_apis.slice(0, 8) })),
+           hops, covers_candidates: best.covered, follows_question_order: !!best.directed, note: "real navigation chain from the dashboard code; hop.click is the button or menu item nearest the navigation call" };
 }

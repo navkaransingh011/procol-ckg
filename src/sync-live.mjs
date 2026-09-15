@@ -6,6 +6,7 @@
 //
 //   node --env-file=.env src/sync-live.mjs --once          # one pass (first run = full load)
 //   node --env-file=.env src/sync-live.mjs                 # loop every LIVE_SYNC_INTERVAL_S (default 60)
+import { widgetNames } from "./template-layout.mjs";
 import pg from "pg";
 import { readFileSync } from "node:fs";
 import { q, pool } from "./db.mjs";
@@ -47,6 +48,11 @@ async function ensureTable(name, spec) {
   const typeOf = (c) => { const t = byName.get(c); if (t.data_type === "ARRAY") return `${t.udt_name.replace(/^_/, "")}[]`; if (t.data_type === "USER-DEFINED") return "text"; return t.data_type; };
   const defs = spec.columns.map(c => `${ident(c)} ${typeOf(c)}`).join(", ");
   await q(`create table if not exists live.${ident(name)} (${defs}, synced_at timestamptz not null default now(), primary key (${ident(spec.key)}))`);
+  // a column newly allowlisted for a table that already exists: add it and re-pull every row once
+  const have = new Set((await q(`select column_name from information_schema.columns where table_schema='live' and table_name=$1`, [name])).map(c => c.column_name));
+  const added = spec.columns.filter(c => !have.has(c));
+  for (const c of added) await q(`alter table live.${ident(name)} add column if not exists ${ident(c)} ${typeOf(c)}`);
+  if (added.length) { await q(`delete from live.sync_state where table_name=$1`, [name]); console.log(`  ${name}: added column(s) ${added.join(", ")}; full re-pull`); }
   await q(`create index if not exists ${ident(name + "_cursor")} on live.${ident(name)} (${ident(spec.cursor)})`);
   for (const c of ["company_id", "config_key", "tenant_id", "template_id", "fx_datasource_id", "approval_flow_id", "key"])
     if (spec.columns.includes(c)) await q(`create index if not exists ${ident(name + "_" + c)} on live.${ident(name)} (${ident(c)})`);
@@ -153,12 +159,17 @@ export async function refreshConfigIndex() {
 // environment switches -- is searchable by MEANING, so "logistics auction templates" or "the approval flow for
 // invoices above 5 lakh" resolves to real rows without the planner guessing substrings. Content-addressed.
 // ---------------------------------------------------------------------------------------------------
-const LIVE_INDEX_SOURCES = {
-  templates:       { sql: `select id, company_id, name || ' (template' || coalesce(' type ' || template_type::text, '') || coalesce(', order type ' || order_type::text, '') || ')' as text from live.templates where name is not null` },
+function liveIndexSources() { return ({
+  templates:       { sql: `select t.id, t.company_id, t.name, t.template_for, t.template_type, t.order_type, t.widgets from live.templates t where t.name is not null`,
+                     text: (t) => {
+                       const FOR = ["trade", "contract", "rfi", "module", "vendor", "allocation summary", "custom search"], TYPE = ["default", "custom", "dynamic"];
+                       const names = widgetNames(t.widgets, 40);
+                       return `${t.name} (template for ${FOR[t.template_for] || "unknown"}${TYPE[t.template_type] ? ", " + TYPE[t.template_type] : ""}, ${t.order_type === 1 ? "sell" : "buy"})${names.length ? ". Asks for: " + names.join(", ") : ""}`;
+                     } },
   approval_flows:  { sql: `select id, company_id, coalesce(name,'') || ' — approval flow for ' || coalesce(approval_key,'') || coalesce('. ' || description, '') as text from live.approval_flows` },
   fx_datasources:  { sql: `select id, tenant_id as company_id, name || ' (flexi datasource)' as text from live.fx_datasources where name is not null` },
   procol_variables:{ sql: `select id, null::int as company_id, key || ' (environment variable)' as text from live.procol_variables` },
-};
+}); }
 export async function refreshLiveIndex() {
   const { embed, embedModelId, toPgVector } = await import("./service/embed.mjs");
   const { createHash } = await import("node:crypto");
@@ -168,8 +179,8 @@ export async function refreshLiveIndex() {
              refreshed_at timestamptz default now(), primary key (kind, ref_id))`);
   await q(`grant select on live.search_index to ckg_reader`).catch(() => {});
   let embedded = 0, total = 0;
-  for (const [kind, src] of Object.entries(LIVE_INDEX_SOURCES)) {
-    const rows = await q(src.sql);
+  for (const [kind, src] of Object.entries(liveIndexSources())) {
+    const rows = (await q(src.sql)).map(r => src.text ? { ...r, text: src.text(r) } : r);
     total += rows.length;
     const have = new Map((await q(`select ref_id, hash, model from live.search_index where kind=$1`, [kind])).map(r => [String(r.ref_id), r]));
     const todo = rows.map(r => ({ ...r, hash: createHash("sha1").update(r.text).digest("hex") })).filter(r => { const e = have.get(String(r.id)); return !e || e.hash !== r.hash || e.model !== model; });

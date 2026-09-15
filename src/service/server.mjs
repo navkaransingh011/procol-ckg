@@ -12,6 +12,8 @@ import { resolveScope } from "../tools.mjs";
 import { embed } from "./embed.mjs";
 import { authConfig, sessionFromRequest, createSession, destroySession, checkPassword, clearCookie as clearCookieFor } from "./auth.mjs";
 import { filterEvent, allowedRefs, styleFor, isOpen } from "./policy.mjs";
+import { createChat, listChats, getChat, chatMeta, appendTurn, historyFor, renameChat, deleteChat, sweepRetention, chatStorage } from "./chats.mjs";
+import { looksLikeTicket, maskPII } from "./triage.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.CKG_HOST || "127.0.0.1";
@@ -102,6 +104,35 @@ const server = createServer(async (req, res) => {
     return json(res, 200, { ok: true }, { "set-cookie": clearCookieFor(req) });
   }
 
+  // ---- chats (personal; every query is scoped by the session's email) ----
+  const chatMatch = /^\/api\/chats(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
+  if (chatMatch) {
+    const user = await sessionFromRequest(req);
+    if (!user) return json(res, 401, { error: "sign in first" });
+    const id = chatMatch[1];
+    try {
+      if (!id && req.method === "GET") return json(res, 200, { chats: await listChats(user.email) });
+      if (!id && req.method === "POST") { const { title } = await readJson(req, 4 * 1024); return json(res, 200, { chat: await createChat(user.email, title || null) }); }
+      if (id && req.method === "GET") { const c = await getChat(user.email, id); return c ? json(res, 200, { chat: c }) : json(res, 404, { error: "no such chat" }); }
+      if (id && req.method === "PATCH") { const { title } = await readJson(req, 4 * 1024); const c = await renameChat(user.email, id, String(title || "")); return c ? json(res, 200, { chat: c }) : json(res, 404, { error: "no such chat" }); }
+      if (id && req.method === "DELETE") return (await deleteChat(user.email, id)) ? json(res, 200, { ok: true }) : json(res, 404, { error: "no such chat" });
+    } catch (e) { return json(res, e.code || 500, { error: e.message }); }
+    return json(res, 405, { error: "method not allowed" });
+  }
+
+  // ---- triage feedback: right or wrong, from the person who asked ----
+  if (url.pathname === "/api/feedback" && req.method === "POST") {
+    const user = await sessionFromRequest(req);
+    if (!user) return json(res, 401, { error: "sign in first" });
+    try {
+      const b = await readJson(req, 8 * 1024);
+      if (typeof b.correct !== "boolean") return json(res, 400, { error: "correct must be true or false" });
+      await q(`insert into ckg.triage_feedback (email, chat_id, seq, verdict, correct, note) values ($1,$2,$3,$4,$5,$6)`,
+              [user.email, b.chat_id || null, Number.isInteger(b.seq) ? b.seq : null, String(b.verdict || "").slice(0, 40) || null, b.correct, String(b.note || "").slice(0, 1000) || null]);
+      return json(res, 200, { ok: true });
+    } catch (e) { return json(res, e.code || 400, { error: e.message }); }
+  }
+
   // ---- the question ----
   if (url.pathname === "/api/ask" && req.method === "POST") {
     const user = await sessionFromRequest(req);
@@ -113,6 +144,11 @@ const server = createServer(async (req, res) => {
 
     const question = String(parsed.question || "").trim();
     if (!question) return json(res, 400, { error: "question is required" });
+    // the chat this turn belongs to: the given one (must be the person's), else a new one titled by the question
+    let chat = null, chatIsNew = false;
+    if (parsed.chat_id) { chat = await chatMeta(user.email, String(parsed.chat_id)); if (!chat) return json(res, 404, { error: "no such chat" }); }
+    else { chat = await createChat(user.email, question); chatIsNew = true; }
+    const history = chatIsNew ? [] : await historyFor(user.email, chat.id, 6).catch(() => []);
     const wanted = Array.isArray(parsed.refs) && parsed.refs.length ? parsed.refs : ["main"];
     const refs = allowedRefs(policy, wanted);            // a branch the role may not read becomes main
     const style = styleFor(policy);                      // the role decides the answer style, not the client
@@ -132,21 +168,26 @@ const server = createServer(async (req, res) => {
     });
     // Every event passes the role filter on its way out: paths, code nodes and source never reach a browser
     // whose role may not see them, whatever the model wrote.
-    const emit = (event) => { const f = filterEvent(event, policy); if (f) res.write(`data: ${JSON.stringify(f)}\n\n`); };
+    const stored = [];                                  // what this person saw (after the role filter), for replay
+    const emit = (event) => { const f = filterEvent(event, policy); if (f) { res.write(`data: ${JSON.stringify(f)}\n\n`); if (f.type !== "status") stored.push(f); } };
     const keepAlive = setInterval(() => res.write(": ping\n\n"), 15000);
 
     const t0 = Date.now();
     let summary = null, failed = false;
+    emit({ type: "chat", id: chat.id, title: chat.title, is_new: chatIsNew });
     try {
       if (!isOpen(policy)) emit({ type: "status", text: `answering for ${policy.label}: ${policy.code_names ? "code names, no file paths" : "product terms only, no code"}` });
       if (refs.join() !== wanted.join()) emit({ type: "status", text: `branch ${wanted.join(", ")} is not available to ${policy.label}; reading ${refs.join(", ")}` });
-      summary = await ask({ question, refs, emit, style, fresh, policy });
+      summary = await ask({ question, refs, emit, style, fresh, policy, history });
     } catch (e) {
       failed = true;
       emit({ type: "error", code: "agent_failed", message: e.message });
     } finally {
       clearInterval(keepAlive);
       res.end();
+      if (stored.some(e => e.type === "token" || e.type === "table" || e.type === "template"))
+        appendTurn(user.email, chat.id, { question: looksLikeTicket(question) ? maskPII(question) : question, standalone_question: stored.find(e => e.type === "rewrite")?.standalone || null, refs, role: user.role, events: stored,
+                                          model: summary?.model || null, ms: Date.now() - t0, cached: !!summary?.cached }).catch(() => {});
       q(`insert into ckg.ask_log (email, role, question, refs, style, model, ms, ok, cached) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
         [user.email, user.role, question, refs, style, summary?.model || null, Date.now() - t0, !failed, !!summary?.cached]).catch(() => {});
     }
@@ -176,11 +217,17 @@ const server = createServer(async (req, res) => {
   json(res, 404, { error: "not found" });
 });
 
+// Chat retention: turns older than CKG_CHAT_RETENTION_DAYS (default 180) lose their replay events; text stays.
+const RETENTION_DAYS = Number(process.env.CKG_CHAT_RETENTION_DAYS || 180);
+const sweep = () => sweepRetention(RETENTION_DAYS).then((n) => { if (n) console.log(`  chats     pruned replay events of ${n} turns older than ${RETENTION_DAYS} days`); }).catch(() => {});
+setTimeout(sweep, 60_000); setInterval(sweep, 24 * 3600_000);
+
 server.listen(PORT, HOST, () => {
   const p = provider();
   console.log(`ckg-agent on http://${HOST}:${PORT}`);
   console.log(`  provider  ${p.mock ? "mock (no model, no key)" : p.base + " · " + p.model}`);
   console.log(`  auth      email + password (ckg.users), roles from config/roles.json`);
+  chatStorage().then((c) => console.log(`  chats     ${c.chats} chats, ${c.turns} turns, ${c.size}; replay events kept ${RETENTION_DAYS} days`)).catch(() => {});
   console.log(`  cors      ${ORIGIN}`);
   // Warm the embedding model now, so the first question's document search is ~12 ms instead of ~170 ms.
   embed(["warm up"]).then(() => console.log("  embed     warm")).catch((e) => console.log(`  embed     not available (${e.message}); document search will be skipped`));

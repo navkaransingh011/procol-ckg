@@ -157,6 +157,42 @@ gap is mostly the dump's own errors -- methods inside `class << self` labelled a
 emit the correct class-method form) and ownerless top-level script methods (dropped; they collide by name).
 Not covered yet: the 26 `mcp_tool` definitions, which are not Ruby symbols and need their own extractor.
 
+## Screens and clicks (fe-screens)
+
+The layer a CS or PM question lives in: **which screen, which button, then what**. `src/extractors/fe-screens.mjs`
+reads the React dashboards and produces, per commit:
+
+- `UI_ROUTE` -- every screen from `src/app/routes/routeConfigs.js`: human name, route path, breadcrumb parents,
+  search keywords, permission key, and the view folder that renders it (via `routeComponentsConfigs.js`).
+- `UI_ACTION` -- the buttons, wizard steps, tabs, dialog titles and menu items inside a screen's view folder. Labels
+  come from `src/translations/en.json` when the code uses `t("...")`, else from the literal JSX text.
+- Edges: screen `DECLARES` action; screen `ISSUES_HTTP` call site (the `fe-http` call sites in its folder, so a click
+  chains to the backend handler through `TARGETS`/`SERVES`); screen `NAVIGATES_TO` screen (from `history.push`, `to=`).
+
+Measured on `procol-client-dashboard@main`: 123 screens, ~510 actions, 190 screen-to-screen links, e.g. Purchase Requisition -> Add Items,
+Create PO, Reorder, Upload PRs, Purchase Cart; Awarding -> Create Proposal, Create PO, Create Contract; New Event ->
+Select Template > Edit & Configure Event > Select Participants. Every role may see this layer (it is product language),
+and the answer prompt asks for journeys as screens and clicks in order, then what the system does after each.
+
+Journeys: `screenJourney` (src/tools.mjs) walks the `NAVIGATES_TO` graph from the first screen a question names to the
+last, through the ones in between, and the answer uses that chain as its backbone (facts.screen_journey).
+Known gaps: shared components are attributed through imports (two hops), so a few actions still have no screen; labels
+built at runtime and navigations computed from data are invisible to a regex extractor; the click for a hop is the
+button nearest the navigation call in the same file, so some hops have none.
+Bump `VERSION` in the extractor to re-extract every file.
+
+## Per-company configuration and ticket triage
+
+`src/service/configs.mjs` resolves a customer's switches the way the platform does (`CustomConfiguration.cached_all_configs`:
+default <- company master <- active override) and reports what agrees and differs across the companies a name matches
+(names repeat; company ids are always shown). The planner calls it for "what is on/off for <customer>" (`config_for`) and
+"which companies have X" (`companies_with`). `config/tenants.json` maps tenant words to company name patterns.
+
+`src/service/triage.mjs` turns a pasted ticket into a card: customer, likely feature with confidence, governing switches with
+the customer's effective values, guides, screens, owners, and a verdict (knowledge / config / engineering / more_info) the
+model may pick only from the set the facts allow. Feedback lands in `ckg.triage_feedback`; calibrate with
+`src/eval-triage.mjs`. See docs/TRIAGE.md.
+
 ## Observed evidence across commits
 
 Runtime CALLS edges and OBSERVED_DEFECT nodes come from test-run tracing, which does not re-run on every

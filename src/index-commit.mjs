@@ -17,13 +17,14 @@ import * as beSchema   from "./extractors/be-schema.mjs";
 import * as beExternal from "./extractors/be-external.mjs";
 import * as beAst      from "./extractors/be-ast.mjs";
 import * as docs       from "./extractors/docs.mjs";
+import * as feScreens  from "./extractors/fe-screens.mjs";
 import { linkDocMentions } from "./doclink.mjs";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { normalizeEndpoint } from "./normalize.mjs";
 
-const EXTRACTORS = [feHttp, beRoutes, beSchema, beExternal, beAst, docs];
+const EXTRACTORS = [feHttp, beRoutes, beSchema, beExternal, beAst, docs, feScreens];
 const SECRET_PATHS = /(^|\/)(\.env|\.env\..*|.*\.pem|id_rsa.*|.*\.key|.*\.p12)$/;
 // What gets its TEXT stored (so the agent can read and grep it without a clone).
 const SOURCE_DIRS = /^(app|lib|config|db|src|spec|test)\//;
@@ -241,16 +242,26 @@ async function main() {
   // This is pure in-memory work, so exactness is free.
   const entities = new Map();          // fqn -> row (first writer wins)
   const edges = [];
-  const ctx = { siteHash, normalizeEndpoint };
+  // Every extractor's facts for this commit, by path, so a resolver can join across files (a screen's route
+  // table, its labels and the call sites fe-http found in its folder). Pure in-memory; loaded once per commit.
+  const factsByEx = new Map();
+  for (const ex of EXTRACTORS) {
+    if (typeof ex.resolve !== "function") continue;
+    const mine = relevant.filter((f) => ex.handles(f.path));
+    if (!mine.length) { factsByEx.set(ex.NAME, { mine, facts: new Map(), byPath: new Map() }); continue; }
+    const facts = await loadFacts([...new Set(mine.map((f) => f.blobSha))], ex.NAME, ex.VERSION);
+    const byPath = new Map();
+    for (const f of mine) { const got = facts.get(f.blobSha); if (got) byPath.set(f.path, got); }
+    factsByEx.set(ex.NAME, { mine, facts, byPath });
+  }
+  const ctx = { siteHash, normalizeEndpoint, factsFor: (name) => factsByEx.get(name)?.byPath || new Map() };
   const addEntity = (r) => { if (!entities.has(r.fqn)) entities.set(r.fqn, r); };
 
   const stats = {};
   for (const ex of EXTRACTORS) {
     if (typeof ex.resolve !== "function") continue;
-    const mine = relevant.filter((f) => ex.handles(f.path));
+    const { mine, facts } = factsByEx.get(ex.NAME);
     if (!mine.length) continue;
-    const facts = await loadFacts(
-      [...new Set(mine.map((f) => f.blobSha))], ex.NAME, ex.VERSION);
     let n = 0;
     for (const f of mine) {
       const got = facts.get(f.blobSha);

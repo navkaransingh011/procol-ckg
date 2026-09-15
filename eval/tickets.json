@@ -1,0 +1,42 @@
+[
+  {
+    "id": "t1",
+    "note": "EXAMPLE written from the guides, not a real ticket. Replace with real anonymised tickets; expect_verdict comes from what actually happened.",
+    "text": "Customer: Reliance Retail\nSubject: Approvers not getting the PR approval request\nThe buyer team reported that when they submit a purchase request above 5 lakh, the approval request is not reaching the second approver. The first approver approves, then nothing happens and the PR stays in \"approval in progress\". They also asked whether approval by email is supposed to work for them. This started after they changed their approval flow last week.",
+    "expect_verdict": [
+      "knowledge",
+      "config",
+      "more_info"
+    ],
+    "expect_feature_contains": "approval"
+  },
+  {
+    "id": "t2",
+    "note": "EXAMPLE",
+    "text": "Customer: GMMCO\nSubject: Vendor cannot see the RFQ\nA supplier says they were added to the event but cannot see it in their portal. The buyer used the Select Participants step and the vendor's email is correct. No error is shown.",
+    "expect_verdict": [
+      "knowledge",
+      "more_info",
+      "config"
+    ],
+    "expect_feature_contains": [
+      "rfq",
+      "event",
+      "vendor"
+    ]
+  },
+  {
+    "id": "t3",
+    "note": "EXAMPLE",
+    "text": "Customer: Decathlon\nSubject: Create PO fails\nAfter awarding, clicking Create PO shows the error \"Template not found\" and no PO is created. Happens on every event since Monday.",
+    "expect_verdict": [
+      "engineering",
+      "config",
+      "more_info"
+    ],
+    "expect_feature_contains": [
+      "award",
+      "po"
+    ]
+  }
+]

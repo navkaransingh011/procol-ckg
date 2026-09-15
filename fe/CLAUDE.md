@@ -32,7 +32,15 @@ procol-ckg/
     src/main.jsx         mounts <App/>
     src/App.jsx          layout: header (brand, Auto/Simple/Code toggle, branch picker, New question),
                          stage (hero, composer, suggestions | history chips, active turn), footer meta
-    src/useAgent.js      ALL state: health, refs, selectedRef, style, turns[], active, asking; ask/stop/reset
+    src/useAgent.js      ALL state: me, health, refs, selectedRef, chats[], chatId, turns[], active, asking; ask/stop/newChat/openChat.
+                         Chats are saved on the server (/api/chats); a saved turn is replayed through applyEvent(), the same
+                         reducer the live stream uses, so old answers redraw identically. URL /c/<chat id> mirrors the open chat.
+                         Ticket triage: the composer's Ask/Ticket chip prefixes "triage:"; the server also detects pasted
+                         complaints. The stream then carries a `triage` event (verdict knowledge|config|engineering|more_info,
+                         confidence, customer, features_found, switches with the customer's effective values, guides, screens,
+                         owners, checks, reply_draft, handoff, questions) rendered by TriageCard.jsx; 👍/👎 posts /api/feedback.
+                         Events you will see beyond the answer stream: `chat` {id,title,is_new} first, and `rewrite`
+                         {question, standalone} when a follow-up was understood via the conversation (shown as "understood as").
     src/api.js           getHealth, getRefs, getAuthConfig, getMe, login(email,password), logout, askStream
                          (fetch + ReadableStream over SSE, credentials: include; NOT EventSource)
     src/components/Login.jsx      the sign-in card: email + password (accounts are created by `npm run users -- add`;
@@ -41,6 +49,7 @@ procol-ckg/
                          columns above the bar and dissolving at it; pure CSS motion, fades out when a turn is live.
                          App.jsx measures the bar and sets --bar-y so the fade lands exactly on it.
     src/components/Background.jsx the graph constellation canvas, now at .55 opacity under the icon field
+    src/components/TemplatePreview.jsx  a template's layout (sheet / form / fields) drawn from mirror data, styled like the platform sheet
     src/components/Composer.jsx   the centered input pill: autosize, Enter=send, Shift+Enter=newline, stop button, progress sweep
     src/components/Answer.jsx     status line, prose, TracePath, "Where the trail stops", truncated note, error, receipt
     src/components/TracePath.jsx  the execution path drawn as coloured nodes joined by labelled connectors

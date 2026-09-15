@@ -1,13 +1,37 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import Markdown from "./Markdown.jsx";
 import Timeline from "./Timeline.jsx";
 import Trace from "./Trace.jsx";
 import DataTable from "./DataTable.jsx";
+import TemplatePreview from "./TemplatePreview.jsx";
+import Workflow from "./Workflow.jsx";
+import TriageCard from "./TriageCard.jsx";
 
-export default function Answer({ turn, asking }) {
+export default function Answer({ turn, asking, onFeedback }) {
   const [copied, setCopied] = useState(false);
   const simple = turn.intent === "simple";
   const hasTrace = turn.claims.length > 0;
+  const flow = turn.flow || null;
+
+  // Workflow sync: the drawing walks through its steps once when it arrives, then follows the reader's hover.
+  const [active, setActive] = useState(null);
+  const [hover, setHover] = useState(null);
+  const [visited, setVisited] = useState(() => new Set());
+  const proseRef = useRef(null);
+  useEffect(() => {
+    if (!flow || asking) return undefined;
+    let i = 0; setVisited(new Set());
+    const tick = () => { if (i >= flow.steps.length) { setActive(null); return; } const id = flow.steps[i++].id; setActive(id); setVisited((v) => new Set([...v, id])); t = setTimeout(tick, 900); };
+    let t = setTimeout(tick, 400);
+    return () => clearTimeout(t);
+  }, [flow, asking]);
+  const onStepClick = (id) => {
+    setActive(id);
+    const el = proseRef.current?.querySelector(`.step-ref[data-step="${id}"]`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    el?.classList.add("step-ref--flash"); setTimeout(() => el?.classList.remove("step-ref--flash"), 1200);
+  };
+  const stepCtl = flow ? { active: hover || active, onHover: setHover, onClick: (id) => setActive(id) } : null;
 
   const copy = async () => {
     try { await navigator.clipboard.writeText(turn.text); setCopied(true); setTimeout(() => setCopied(false), 1400); } catch { /* blocked */ }
@@ -19,13 +43,32 @@ export default function Answer({ turn, asking }) {
     <div className="answer">
       <Timeline steps={turn.steps} asking={asking} startedAt={turn.startedAt} ms={turn.summary?.ms} />
 
+      {turn.triage && <TriageCard t={turn.triage} onFeedback={(ok) => onFeedback?.(turn, ok)} />}
+
       {turn.text && (
-        <div className="prose-wrap">
-          <Markdown text={turn.text} />
-          <button type="button" className="ghost ghost--sm copy" onClick={copy}>{copied ? "copied" : "copy"}</button>
+        <div className={flow ? "answer-split" : undefined}>
+          <div className="prose-wrap" ref={proseRef}>
+            <Markdown text={turn.text} step={stepCtl} />
+            <button type="button" className="ghost ghost--sm copy" onClick={copy}>{copied ? "copied" : "copy"}</button>
+          </div>
+          {flow && (
+            <aside className="answer-side" aria-label="Workflow">
+              <div className="wf-head">
+                <span className="label">Workflow · {flow.steps.length} steps</span>
+                <span className="wf-legend">
+                  {[...new Set(flow.steps.map((s) => s.actor))].map((a) => <span key={a}><i className={`sw sw--actor-${a}`} />{a}</span>)}
+                </span>
+              </div>
+              <Workflow flow={flow} active={hover || active} visited={visited} onSelect={onStepClick} />
+              {flow.partial && <p className="note wf-note">Some steps could not be tied to a fact in the graph and are drawn dashed.</p>}
+            </aside>
+          )}
         </div>
       )}
       {!turn.text && !asking && hasTrace && <p className="note">No prose came back, but the path below is read straight from the graph and stands on its own.</p>}
+
+      {/* A template the question is about, laid out as the dashboard shows it. */}
+      {(turn.templates || []).map((t) => <TemplatePreview key={t.id} t={t} />)}
 
       {/* Complete result sets from the live platform mirror: exact rows, the prose only summarises them. */}
       {(turn.tables || []).map((t, i) => <DataTable key={`${t.source}-${i}`} table={t} />)}

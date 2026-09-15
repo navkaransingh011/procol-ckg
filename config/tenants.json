@@ -1,0 +1,14 @@
+{
+  "_comment": "Words people use for a customer -> the company name patterns in the platform (live.companies.name ILIKE). Grows as CS confirms matches; the agent never guesses a company it cannot name.",
+  "reliance": ["reliance%"],
+  "ril": ["reliance industries%"],
+  "jindal": ["jindal%", "jsw%"],
+  "saint gobain": ["saint gobain%", "saint-gobain%"],
+  "amns": ["amns%", "arcelormittal nippon%"],
+  "gmmco": ["gmmco%"],
+  "grasim": ["grasim%"],
+  "decathlon": ["decathlon%"],
+  "amity": ["amity%"],
+  "dlf": ["dlf%"],
+  "moon beverages": ["moon beverages%"]
+}

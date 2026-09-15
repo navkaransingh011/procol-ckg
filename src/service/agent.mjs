@@ -4,6 +4,11 @@
 // structured results it cannot edit. It never sees source code and never invents
 // a fact. Everything it can cite came from a deterministic extractor.
 import { redactFacts } from "./policy.mjs";
+import { FLOW_RULES, wantsFlow, extractFlow } from "./flow.mjs";
+import { needsContext, resolveFollowUp, CONVERSATION_RULE } from "./followup.mjs";
+import { templateView, screenView, screenJourney, screensNamedIn } from "../tools.mjs";
+import { configFor, companiesWith, companyMentions } from "./configs.mjs";
+import { looksLikeTicket, parseTicket, collectTriageFacts, TRIAGE_SYSTEM, extractTriage } from "./triage.mjs";
 import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, listEntities, ownersOf, getSummaries, endpointFamily, readSource, grepSource, semanticAnchor, searchDocs, queryLive, searchConfigs, searchLive, LIVE_DOC, NARRATIVE_EDGES } from "../tools.mjs";
 import { q } from "../db.mjs";
 import { createHash } from "node:crypto";
@@ -80,14 +85,30 @@ const norm = (s) => String(s || "").toLowerCase().replace(/[^\p{L}\p{N}#./:_-]+/
  * Cache in front of the real run. Key = question (normalised) + style + the exact commits in scope, so a
  * re-index misses on its own. Replays the stored event stream in ~ms with one leading status line.
  */
-export async function ask({ question, refs = ["main"], emit, style = "auto", fresh = false, policy = null }) {
+const CACHE_VERSION = 3;   // 3: template previews styled like the platform sheet
+export async function ask({ question: asked, refs = ["main"], emit, style = "auto", fresh = false, policy = null, history = null }) {
   const p0 = provider();
-  if (p0.mock || fresh || process.env.CKG_ANSWER_CACHE === "0") return askUncached({ question, refs, emit, style, policy });
+  // Inside a chat, a follow-up is rewritten into a standalone question from what earlier turns made explicit.
+  // Everything downstream (planning, retrieval, the cache key) uses the standalone form; the person sees the original.
+  let question = asked;
+  if (Array.isArray(history) && history.length && needsContext(asked) && !p0.mock) {
+    const r = await resolveFollowUp({ question: asked, history }).catch(() => null);
+    if (r?.used_history && r.standalone) { question = r.standalone; emit({ type: "rewrite", question: asked, standalone: question }); emit({ type: "status", text: `understood as: ${question}` }); }
+  }
+  const conversation = Array.isArray(history) && history.length ? history : null;
+  if (p0.mock || fresh || process.env.CKG_ANSWER_CACHE === "0") return askUncached({ question, refs, emit, style, policy, conversation });
   const { commits } = await resolveScope(refs);
   // the role is part of the key: an engineer's cached answer (with paths) must never replay for a CS user
   const view = policy ? JSON.stringify(policy) : "open";
-  const key = createHash("sha1").update(`${norm(question)}|${style}|${view}|${[...commits].sort().join(",")}`).digest("hex");
-  const hit = await q(`update ckg.answer_cache set hits = hits + 1, last_hit = now() where key = $1 returning events, created_at, ms`, [key]).catch(() => []);
+  // CACHE_VERSION: bump when the answer format changes (new event types, prompt changes), so old replays retire
+  const key = createHash("sha1").update(`v${CACHE_VERSION}|${norm(question)}|${style}|${view}|${[...commits].sort().join(",")}`).digest("hex");
+  let hit = await q(`update ckg.answer_cache set hits = hits + 1, last_hit = now() where key = $1 returning events, created_at, ms`, [key]).catch(() => []);
+  // Answers that showed live platform data (tables, template layouts) go stale as UAT changes, so they are
+  // replayed only for a while; code-only answers stay valid until the commits move (that is in the key).
+  if (hit.length && hit[0].events.some(e => e.type === "table" || e.type === "template")) {
+    const ageMin = (Date.now() - new Date(hit[0].created_at).getTime()) / 60000;
+    if (ageMin > Number(process.env.CKG_LIVE_CACHE_TTL_MIN || 60)) { await q(`delete from ckg.answer_cache where key = $1`, [key]).catch(() => {}); hit = []; }
+  }
   if (hit.length) {
     const age = Math.round((Date.now() - new Date(hit[0].created_at).getTime()) / 60000);
     emit({ type: "status", text: `answered before (${age < 1 ? "just now" : age < 60 ? age + " min ago" : Math.round(age / 60) + " h ago"}); replaying from cache` });
@@ -97,14 +118,14 @@ export async function ask({ question, refs = ["main"], emit, style = "auto", fre
   }
   const events = [];
   const rec = (e) => { emit(e); if (e.type !== "status") events.push(e); };   // status lines are transient by design
-  const summary = await askUncached({ question, refs, emit: rec, style, policy });
+  const summary = await askUncached({ question, refs, emit: rec, style, policy, conversation });
   if (summary && !events.some(e => e.type === "error") && events.some(e => e.type === "token"))
     await q(`insert into ckg.answer_cache (key, question, style, commits, events, ms) values ($1,$2,$3,$4,$5,$6) on conflict (key) do nothing`,
             [key, question, style, commits, JSON.stringify(events), summary.ms ?? null]).catch(() => {});
   return summary;
 }
 
-async function askUncached({ question, refs = ["main"], emit, style = "auto", policy = null }) {
+async function askUncached({ question, refs = ["main"], emit, style = "auto", policy = null, conversation = null }) {
   const t0 = Date.now();
   const p = provider();
   const collectedEvidence = new Map();
@@ -114,9 +135,10 @@ async function askUncached({ question, refs = ["main"], emit, style = "auto", po
   emit({ type: "intent", intent, chosen: style });
 
   if (p.mock) return mockRun({ question, refs, emit, t0 });
+  if (looksLikeTicket(question)) return triageRun({ question, refs, emit, t0, p, policy, conversation });
   if (mode() === "sql") return sqlRun({ question, refs, emit, t0, p });
-  if (mode() === "auto") return routeAuto({ question, refs, emit, t0, p, intent, policy });
-  if (mode() === "plan") return planRun({ question, refs, emit, t0, p, intent, policy });
+  if (mode() === "auto") return routeAuto({ question, refs, emit, t0, p, intent, policy, conversation });
+  if (mode() === "plan") return planRun({ question, refs, emit, t0, p, intent, policy, conversation });
   if (mode() === "guided") return guidedRun({ question, refs, emit, t0, p, intent, policy });
 
   const messages = [
@@ -528,6 +550,8 @@ Given a question, output ONLY a JSON object -- no prose, no markdown fences:
  "sql": ["<one read-only SELECT against v_nodes / v_edges when no lookup shape above fits; optional>"],
  "live": [{"table": "<one of the live tables below>", "where": {"<col>": "<exact value>"}, "like": {"<col>": "<substring>"},
            "contains": {"<jsonb col>": {"value": true}}, "not_null": ["<col>"], "columns": ["<only the columns the question asks for>"], "limit": 50}],
+ "config_for": [{"company": "<customer / tenant name as written, e.g. Reliance>", "keys_like": "<optional topic word: approval, po, vendor>", "only": "<optional: on | off | overrides>"}],
+ "companies_with": [{"config_key": "<exact config_key>", "value": <true | false>}],
  "endpoint_families": ["<URL path prefix, e.g. /approval_workflow/approval_requests>"],
  "greps": ["<exact code token to find every occurrence of, e.g. self.mcp? or token_type>"],
  "want_source": <true if answering needs the actual code: any "why", "how does it decide", "what does it check",
@@ -535,6 +559,10 @@ Given a question, output ONLY a JSON object -- no prose, no markdown fences:
  "want_summaries": <true if the question asks for an overview, big picture, or "what does X do">,
  "want_owners": <true if the question asks who built, owns, or should be asked about something>}
 
+Use "config_for" whenever the question asks what is on / off / enabled / configured FOR A NAMED CUSTOMER or tenant
+(Reliance, Jindal, GMMCO...). It resolves the effective value per company exactly as the platform does (default <- company
+master <- active override), so never answer such a question from master defaults alone. Use "companies_with" for
+"which companies have X on/off" with the exact config_key. Both are read-only.
 Use "sql" only when the fixed shapes cannot express what you need (a join, a count, a filter on attrs).
 Schema for "sql":
 ${SCHEMA_DOC}
@@ -648,6 +676,20 @@ LIVE PLATFORM DATA -- the CURRENT configuration, from a read-only mirror of the 
   describe what is in the table (groups, notable rows, patterns), and say "see the table below".
 - "live_config_greps" show where the CODE reads a config_key that came back from live data -- this is the join
   between configuration and behaviour. Use it: "X is on for <company> (as of ...), and the code checks it in <file:line>".
+- "effective_configuration": the switches of a NAMED customer with the value the platform actually applies and its source (default,
+  company master, override). This is the answer for "what is on/off for <customer>"; quote effective values and sources, name company ids
+  when several companies match, and say the master default only as the baseline an override changed. "companies_with" counts companies
+  at a value with the same precedence.
+- "template_views": a template exactly as the dashboard lays it out. layout "sheet" = columns in groups (line item columns, event-level price components);
+  layout "form" = pages of questions. side creator = the buyer fills it, participant = the supplier answers. The user already sees it rendered;
+  explain what it collects and who fills what, do not re-list every column or question.
+- "screen_journey" is the REAL navigation chain between dashboard screens (from the code), with the click that leads from each screen to the next
+  and the key actions on each screen. When present, it is the backbone of the answer: walk it screen by screen, name the click for each hop, and
+  for each screen say what the buyer does there and what the system does after (backend_apis / other facts). Do not say the graph lacks the
+  screen sequence when screen_journey is present. "screens" are the same details for individual screens.
+- Nodes of kind UI_ROUTE are dashboard screens (name + route path) and UI_ACTION are the buttons, wizard steps, tabs and dialogs on them
+  (attrs.screen says which screen). For "how do I / where do I / walk me through" questions, describe the journey as screens and clicks in order,
+  using these names exactly; then say what happens in the system after each click. Edges NAVIGATES_TO say which screen leads to which.
 - "live_candidates" are platform rows (templates, approval flows, datasources) closest in meaning to the question,
   with the company they belong to. Use them to name the actual template/flow the question is about.
 - "config_candidates" are the configuration switches closest IN MEANING to the question (key, human name, description,
@@ -847,7 +889,7 @@ function sanitizePaths(text, knownPaths) {
   const known = [...knownPaths].filter(Boolean);
   const bases = new Set(known.map(k => k.split("/").pop()));
   let removed = 0;
-  const out = text.replace(/`?((?:[\w.-]+\/)+[\w.-]+\.(?:rb|js|jsx|ts|tsx|erb|yml|rake))(:\d+(?:-\d+)?)?`?/g, (m, pth) => {
+  const out = text.replace(/`?((?:[\w.-]+\/)+[\w.-]+\.(?:rake|jsx|tsx|erb|yml|rb|js|ts))(:\d+(?:-\d+)?)?`?/g, (m, pth) => {
     const ok = known.some(k => k === pth || k.endsWith("/" + pth) || pth.endsWith("/" + k)) || bases.has(pth.split("/").pop());
     if (ok) return m;
     removed++;
@@ -855,21 +897,21 @@ function sanitizePaths(text, knownPaths) {
   });
   return { text: out, removed };
 }
-const pathsIn = (json) => new Set((json.match(/[\w./-]+\.(?:rb|js|jsx|ts|tsx|yml|erb|rake)\b/g) || []).filter(x => x.includes("/")));
+const pathsIn = (json) => new Set((json.match(/[\w./-]+\.(?:rake|jsx|tsx|yml|erb|rb|js|ts)\b/g) || []).filter(x => x.includes("/")));
 
 /** Every file path the model was shown, so a checker can tell "invented" from "given in a list". */
 function emitContextPaths(factsJson, emit) {
-  const paths = new Set((factsJson.match(/[\w./-]+\.(?:rb|js|jsx|ts|tsx|yml|erb)\b/g) || []).filter(x => x.includes("/")));
+  const paths = new Set((factsJson.match(/[\w./-]+\.(?:jsx|tsx|yml|erb|rb|js|ts)\b/g) || []).filter(x => x.includes("/")));
   if (paths.size) emit({ type: "context_paths", paths: [...paths].slice(0, 400) });
 }
 
-async function routeAuto({ question, refs, emit, t0, p, intent, policy = null }) {
+async function routeAuto({ question, refs, emit, t0, p, intent, policy = null, conversation = null }) {
   const a = await anchor(question, refs);
   const exactIdent = !!a.seed && !a.weak && IDENTIFIER_RE.test(a.token || "");
   // Fast path only for a code-intent, exact-identifier, non-"why" question.
   if (intent === "code" && exactIdent && !isOverview(question) && !THOUGHT_RE.test(question))
     return guidedRun({ question, refs, emit, t0, p, intent, policy });
-  return planRun({ question, refs, emit, t0, p, intent, policy });
+  return planRun({ question, refs, emit, t0, p, intent, policy, conversation });
 }
 
 const PLAN_LOOKUPS = 6, PLAN_TOTAL_LOOKUPS = 8, PLAN_LISTS = 3, LIST_LIMIT = 40, FACTS_BUDGET = 30000;
@@ -898,14 +940,16 @@ function shrink(facts, budget) {
 }
 
 /** Get the answer (one retry with half the facts), strip any path not in the facts, emit it once. */
-async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYSTEM }) {
+async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYSTEM, flow = false }) {
   const known = pathsIn(JSON.stringify(facts));
-  let text = "";
+  let text = "", shownJson = "";
   const run = async (json) => {
-    const messages = [{ role: "system", content: system }, { role: "user", content: `QUESTION: ${question}\n\nFACTS:\n${json}` }];
+    shownJson = json;
+    const sys = system + (facts.conversation ? "\n" + CONVERSATION_RULE : "") + (flow ? "\n" + FLOW_RULES : "");
+    const messages = [{ role: "system", content: sys }, { role: "user", content: `QUESTION: ${question}\n\nFACTS:\n${json}` }];
     let t = "";
-    for await (const d of chatStream({ messages, max_tokens: 2400, temperature: 0 })) t += d;
-    if (!t) t = (await chat({ messages, max_tokens: 2400, temperature: 0 })).content || "";
+    for await (const d of chatStream({ messages, max_tokens: flow ? 3200 : 2400, temperature: 0 })) t += d;
+    if (!t) t = (await chat({ messages, max_tokens: flow ? 3200 : 2400, temperature: 0 })).content || "";
     return t;
   };
   try { text = await run(shrink(structuredClone(facts), budget)); }
@@ -915,7 +959,24 @@ async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYST
     catch (e) { emit({ type: "error", code: "llm_failed", message: e.message }); }
   }
   if (!text) { emit({ type: "token", text: "(No prose available - the language model call failed twice. The claims and evidence above come from the code graph and are unaffected.)" }); return ""; }
-  const clean = sanitizePaths(text, known);
+  // the diagram block comes out of the text first; its refs are checked against exactly what the model saw
+  let split = flow ? extractFlow(text, shownJson) : { text, flow: null };
+  if (flow && !split.flow) {
+    // the model wrote prose without the block (or an unusable one): ask once more for the block alone, from its own answer
+    emit({ type: "status", text: `no diagram in the first pass (${split.dropped || "no block"}); asking for the steps` });
+    try {
+      const messages = [{ role: "system", content: "You turn an answer into a workflow diagram. Output ONLY the fenced ```flow block described below, nothing else.\n" + FLOW_RULES },
+                        { role: "user", content: `QUESTION: ${question}\n\nANSWER:\n${split.text}\n\nFACTS (for refs):\n${shownJson.slice(0, 20000)}` }];
+      let t = "";
+      for await (const d of chatStream({ messages, max_tokens: 1200, temperature: 0 })) t += d;
+      const second = extractFlow(`${split.text}\n\n${t}`, shownJson);
+      if (second.flow) split = { text: split.text, flow: second.flow };
+      else split = { ...split, dropped: second.dropped || split.dropped };
+    } catch (e) { split = { ...split, dropped: `second pass failed: ${String(e.message).slice(0, 60)}` }; }
+  }
+  if (split.flow) emit({ type: "flow", ...split.flow, steps_total: split.flow.steps.length });
+  else if (flow && split.dropped) emit({ type: "status", text: `no diagram: ${split.dropped}` });
+  const clean = sanitizePaths(split.text, known);
   if (chatStream.lastModel && chatStream.lastModel !== provider().model)
     emit({ type: "status", text: `primary model stalled; answered by fallback model ${chatStream.lastModel}` });
   emit({ type: "token", text: clean.text });
@@ -981,7 +1042,7 @@ async function completeSets(question, results) {
   }));
 }
 
-async function planRun({ question, refs, emit, t0, p, intent = "code", policy = null }) {
+async function planRun({ question, refs, emit, t0, p, intent = "code", policy = null, conversation = null }) {
   const canSource = !policy || policy.code_source;      // restricted roles never read or grep source
   // Phase 0: candidates by MEANING. Fails soft when no embeddings exist. The pilot measured this as the
   // difference between 5/8 and 7/8 on questions asked in everyday words.
@@ -1016,7 +1077,8 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
   emit({ type: "status", text: `planning (${p.model})${sem.length ? ` with ${sem.length} candidates by meaning` : ""}` });
   let plan = null;
   try {
-    const m = await chat({ messages: [{ role: "system", content: PLAN_SYSTEM }, { role: "user", content: `QUESTION: ${question}${candText}` }], max_tokens: 1500, temperature: 0, reasoning_effort: "minimal" });   // structured extraction: minimal thinking; the JSON itself is ~150 tokens
+    const convText = conversation ? `\n\nCONVERSATION SO FAR (context for what the question means; plan for the QUESTION, not for these):\n${JSON.stringify(conversation.map(c => ({ q: c.understood_as || c.question, about: (c.about || []).map(a => a.name) })))}` : "";
+    const m = await chat({ messages: [{ role: "system", content: PLAN_SYSTEM }, { role: "user", content: `QUESTION: ${question}${candText}${convText}` }], max_tokens: 1500, temperature: 0, reasoning_effort: "minimal" });   // structured extraction: minimal thinking; the JSON itself is ~150 tokens
     plan = extractJson(m.content || "");
     if (chatStream.lastModel && chatStream.lastModel !== p.model) emit({ type: "status", text: `planner: primary model produced nothing in time; plan came from fallback ${chatStream.lastModel}` });
   } catch (e) { emit({ type: "status", text: `planner failed (${String(e.message).slice(0, 120)}); using identifiers and candidates` }); }
@@ -1086,6 +1148,51 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
     l.rows_shown_to_user = l.rows.length;                 // the user's table has EVERY returned row
     l.rows_in_this_view = Math.min(40, l.rows.length);    // the model sees a sample; it must not quote this number
     l.rows = l.rows.slice(0, 40).map(r => Object.fromEntries(cols.slice(0, 5).map(c => [c, cell(r[c])])));   // compact view for the model
+  }
+  // PER-COMPANY CONFIGURATION -- the planner's config_for / companies_with, plus a deterministic fallback: a named
+  // company in a configuration question always gets the effective table, never master defaults alone.
+  const configForSpecs = (Array.isArray(plan?.config_for) ? plan.config_for : []).filter(x => x && (x.company || x.company_ids)).slice(0, 2);
+  const CONFIG_WORDS = /\b(config|configs|configuration|configurations|setting|settings|switch|switches|enabled|disabled|turned (on|off)|switched (on|off)|\bon\b|\boff\b|default|defaults|allow|allowed|feature flag)/i;
+  if (!configForSpecs.length && CONFIG_WORDS.test(question)) {
+    const mentioned = await companyMentions(question).catch(() => []);
+    if (mentioned.length) configForSpecs.push({ company_ids: [...new Set(mentioned.map(m => m.id))].slice(0, 6), company: mentioned[0].mention,
+                                                only: /\b(off|disabled|switched off|turned off|not enabled)\b/i.test(question) ? "off" : /\b(on|enabled|switched on|turned on|active)\b/i.test(question) ? "on" : /\boverrid/i.test(question) ? "overrides" : null,
+                                                keys_like: (configs[0]?.config_key && /\b[a-z_]{6,}\b/.test(configs[0].config_key) ? null : null) });
+  }
+  const effectiveConfigViews = [];
+  for (const spec of configForSpecs) {
+    const r = await configFor({ company: spec.company || null, company_ids: spec.company_ids || null, keys_like: spec.keys_like || null, only: spec.only || null }).catch(e => ({ error: e.message }));
+    if (r.error) { emit({ type: "status", text: `configuration for ${spec.company || spec.company_ids}: ${r.error}` }); continue; }
+    effectiveConfigViews.push(r);
+    emit({ type: "status", text: `effective configuration for ${r.companies.map(c => `${c.name} (#${c.id})`).join(", ")}${r.total_matches > r.companies.length ? ` and ${r.total_matches - r.companies.length} more` : ""}: ${r.agree.length} agree, ${r.differ.length} differ${spec.only ? ` (only ${spec.only})` : ""}` });
+    const cols = r.companies.length === 1 ? ["config_key", "name", "effective", "source"] : ["config_key", "name", ...r.companies.map(c => `${c.name} #${c.id}`)];
+    const rows = r.companies.length === 1
+      ? r.agree.map(a => [a.config_key, a.name, JSON.stringify(a.effective), a.sources])
+      : [...r.agree.map(a => [a.config_key, a.name, ...r.companies.map(() => JSON.stringify(a.effective))]),
+         ...r.differ.map(d => [d.config_key, d.name, ...r.companies.map(c => { const x = d.per_company.find(p => p.company_id === c.id); return x ? `${JSON.stringify(x.effective)} (${x.source})` : "n/a"; })])];
+    if (rows.length) emit({ type: "table", title: `Effective configuration for ${r.companies.map(c => c.name).join(", ")}${spec.only ? ` — only ${spec.only}` : ""} — ${rows.length} switch${rows.length === 1 ? "" : "es"} on UAT`,
+                            columns: cols, rows, total: rows.length, complete: true, as_of: r.as_of, source: "effective_configuration" });
+  }
+  const companiesWithViews = [];
+  for (const spec of (Array.isArray(plan?.companies_with) ? plan.companies_with : []).filter(x => x && x.config_key).slice(0, 2)) {
+    const r = await companiesWith({ config_key: spec.config_key, value: spec.value === undefined ? true : spec.value }).catch(e => ({ error: e.message }));
+    if (!r.error) { companiesWithViews.push(r); emit({ type: "status", text: `${r.matching} of ${r.active_companies} active companies have ${r.config_key} = ${JSON.stringify(r.value)} (default ${JSON.stringify(r.default_value)})` }); }
+  }
+
+  // TEMPLATE PREVIEW -- when the question is about a template, show it as the dashboard does (its widget columns).
+  // Subjects: rows the planner fetched from templates (few of them), else the template rows found by meaning.
+  const templateViews = [];
+  if (/\btemplates?\b/i.test(question)) {
+    const fromPlan = live.filter(l => l.table === "templates" && !l.error && (l.rows_shown_to_user || l.rows?.length || 0) <= 3).flatMap(l => (l.rows || []).map(r => r.id));
+    const fromHits = liveHits.filter(h => h.kind === "templates" && h.score >= 0.55).map(h => h.ref_id);
+    const ids = [...new Set([...fromPlan, ...fromHits].map(Number).filter(Number.isInteger))].slice(0, 2);
+    for (const id of ids) {
+      const v = await templateView({ id }).catch(() => null);
+      if (!v || v.error) continue;
+      templateViews.push(v);
+      emit({ type: "template", ...v });
+    }
+    if (templateViews.length) emit({ type: "status", text: `showing ${templateViews.length} template${templateViews.length > 1 ? "s" : ""} as the dashboard lays ${templateViews.length > 1 ? "them" : "it"} out` });
   }
   // three-way join: any config_key that came back from live data -> where the CODE reads it (repo-wide grep)
   const liveKeys = [...new Set([...configs.slice(0, 2).map(c => c.config_key), ...live.flatMap(l => (l.rows || []).map(r => r.config_key).filter(Boolean))])].slice(0, 3);
@@ -1186,13 +1293,50 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
     if (o.length) owners = { scope: dir, people: o };
   }
 
+  // SCREENS -- a lookup that landed on a dashboard screen gets what is on it and where it leads; a journey question
+  // gets the real navigation chain between the screens it is about, so steps are clicks, not guesses.
+  const JOURNEY_RE = /\b(journey|walk me through|step[- ]by[- ]step|end[- ]to[- ]end|how (do|does|can) (i|a|an|the|we|buyer|supplier|user)|where (do|can) (i|we)|from .{3,60} (to|till|until) )/i;
+  let screenJourneyFacts = null;
+  const screenViews = [];
+  for (const r of results) if (r.anchor?.kind === "UI_ROUTE" && r.anchor?.id) { const v = await screenView({ id: r.anchor.id, refs }).catch(() => null); if (v) screenViews.push(v); }
+  if (JOURNEY_RE.test(question)) {
+    try {
+      const hits = (await semanticAnchor({ question, k: 6, refs, kinds: ["UI_ROUTE"] })).matches.filter(m => Number(m.score) >= 0.5);
+      const named = await screensNamedIn({ question, refs });                 // screens the question names, in the order it names them
+      let start = named[0]?.id || null, end = named.length > 1 ? named[named.length - 1].id : null;
+      const span = /\bfrom\s+(.{3,60}?)\s+(?:to|till|until|up to)\s+(?:the\s+|a\s+|an\s+)?(.{2,60}?)(?=[,.:;]|\s+(?:through|via|by|and|which|where|how)\b|$)/i.exec(question);
+      if (span) {
+        const a = await screensNamedIn({ question: span[1], refs }), b = await screensNamedIn({ question: span[2], refs });
+        if (a[0]) start = a[0].id; if (b[0]) end = b[0].id;
+      }
+      const ids = [...new Set([...named.map(n => n.id), ...screenViews.map(v => v.id), ...hits.map(h => Number(h.id))])];
+      screenJourneyFacts = await screenJourney({ candidateIds: named.map(n => n.id).length >= 2 ? named.map(n => n.id) : ids, refs, from: start, to: end });
+      for (const n of named.slice(0, 4)) if (!screenViews.some(v => v.id === n.id)) { const v = await screenView({ id: n.id, refs }).catch(() => null); if (v) screenViews.push(v); }
+      if (screenJourneyFacts) emit({ type: "status", text: `screen journey: ${screenJourneyFacts.screens.map(s => s.screen).join(" → ")}` });
+      for (const h of hits.slice(0, 3)) if (!screenViews.some(v => v.id === Number(h.id))) { const v = await screenView({ id: Number(h.id), refs }).catch(() => null); if (v) screenViews.push(v); }
+    } catch (e) { emit({ type: "status", text: `screen journey unavailable: ${String(e.message).slice(0, 60)}` }); }
+  }
+
   const facts = { question, refs,
+                  ...(conversation ? { conversation } : {}),
+                  ...(screenJourneyFacts ? { screen_journey: screenJourneyFacts } : {}),
+                  ...(screenViews.length ? { screens: screenViews.slice(0, 5) } : {}),
                   lookups: results.map(r => { const o = { ...r }; if (o.anchor) { const { id, ...rest } = o.anchor; o.anchor = rest; } return o; }),
                   ...(lists.length ? { lists } : {}), ...(sqlResults.length ? { planned_sql: sqlResults } : {}),
                   ...(families.length ? { endpoint_families: families } : {}),
                   ...(source.length ? { source } : {}), ...(greps.length ? { greps } : {}),
                   ...(documents.length ? { documents } : {}),
                   ...(live.length ? { live } : {}), ...(liveGreps.length ? { live_config_greps: liveGreps } : {}),
+                  ...(effectiveConfigViews.length ? { effective_configuration: effectiveConfigViews.map(r => ({ companies: r.companies, total_matches: r.total_matches, as_of: r.as_of, filters: r.filters, note: r.note, shown_to_user_as_table: true,
+                        agree: r.agree.slice(0, 80).map(a => ({ config_key: a.config_key, name: a.name, effective: a.effective, source: a.sources })),
+                        differ: r.differ.slice(0, 40).map(d => ({ config_key: d.config_key, name: d.name, per_company: d.per_company.map(x => ({ company_id: x.company_id, effective: x.effective, source: x.source })) })) })) } : {}),
+                  ...(companiesWithViews.length ? { companies_with: companiesWithViews } : {}),
+                  ...(templateViews.length ? { template_views: templateViews.map(v => ({
+                        id: v.id, name: v.name, company: v.company, template_for: v.template_for, template_type: v.template_type, order_type: v.order_type, status: v.status,
+                        layout: v.layout, shown_to_user_as_rendered_template: true, settings: v.configurations,
+                        ...(v.layout === "form"
+                          ? { pages: v.pages.map(p => ({ page: p.name, questions: p.questions.slice(0, 40).map(q => ({ q: q.name, type: q.type, side: q.side, required: q.required, ...(q.options ? { options: q.options } : {}) })) })) }
+                          : { columns: v.groups.map(g => ({ group: g.label, widgets: g.widgets.slice(0, 60).map(w => ({ name: w.name, type: w.type, side: w.side, required: w.required, prefix: w.prefix, suffix: w.suffix, hidden: w.hidden || undefined })) })) }) })) } : {}),
                   ...(liveHits.length ? { live_candidates: liveHits.map(h => ({ table: h.kind, id: h.ref_id, company: h.company, text: h.text, match_score: h.score })) } : {}),
                   ...(configs.length ? { config_candidates: configs.map(c => ({ config_key: c.config_key, name: c.name, description: c.description, default: c.defaults, item_type: c.item_type,
                                                                               overrides: c.overrides, companies_with_it_on: c.companies_active, match_score: c.score })) } : {}),
@@ -1203,7 +1347,9 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
   emitContextPaths(JSON.stringify(facts), emit);
   emit({ type: "status", text: `writing the ${intent === "simple" ? "plain-English" : "technical"} answer (${p.model})` });
   const tAnswer = Date.now();
-  await writeAnswer({ question, facts: policy ? redactFacts(facts, policy) : facts, emit, budget: FACTS_BUDGET, system: intent === "simple" ? ANSWER_SIMPLE_SYSTEM : ANSWER_SYSTEM });
+  const drawFlow = wantsFlow(question) && (results.some(r => r.match !== "none") || documents.length > 0 || live.length > 0);
+  if (drawFlow) emit({ type: "status", text: "drawing the workflow beside the answer" });
+  await writeAnswer({ question, facts: policy ? redactFacts(facts, policy) : facts, emit, budget: FACTS_BUDGET, system: intent === "simple" ? ANSWER_SIMPLE_SYSTEM : ANSWER_SYSTEM, flow: drawFlow });
   const answerMs = Date.now() - tAnswer;
   await emitRefsFooter(refs, emit);
 
@@ -1258,6 +1404,44 @@ When you READ source, you may explain the logic and must cite the numbered lines
 returned hits, enumerate them with path:line. Hard rules: never name a file, line, method, table or route
 that did not appear in a result; if a result was capped, say so; say which ref you queried; do not fill
 gaps from general Rails/React knowledge.`;
+
+/**
+ * TICKET TRIAGE. Facts first (customer, features, switches, guides, screens, owners), then the model writes the card
+ * and picks a verdict only from what the facts allow. The person sees who can resolve it and why.
+ */
+async function triageRun({ question, refs, emit, t0, p, policy = null, conversation = null }) {
+  const ticket = parseTicket(question);
+  emit({ type: "status", text: `triaging a ticket${ticket.customer ? ` for ${ticket.customer}` : ""}${ticket.errors.length ? ` · quoted text: ${ticket.errors.map(e => `"${e.slice(0, 40)}"`).join(", ")}` : ""}` });
+  const facts = await collectTriageFacts({ ticket, refs, emit });
+  if (conversation) facts.conversation = conversation;
+  emit({ type: "status", text: `allowed verdicts from the facts: ${facts.allowed_verdicts.join(", ")}` });
+  for (const g of facts.guides) emit({ type: "evidence", id: `d${g.title}:${g.heading}`, repo: "docs", path: g.path, line: null, extractor: "docs" });
+  const shown = policy ? redactFacts(facts, policy) : facts;
+  emit({ type: "status", text: `writing the triage (${p.model})` });
+  const system = TRIAGE_SYSTEM + `\n\nALLOWED VERDICTS: ${facts.allowed_verdicts.join(", ")}`;
+  let text = "";
+  const json = JSON.stringify(shrink(structuredClone(shown), FACTS_BUDGET));
+  try { for await (const d of chatStream({ messages: [{ role: "system", content: system }, { role: "user", content: `TICKET:\n${ticket.body.slice(0, 3000)}\n\nFACTS:\n${json}` }], max_tokens: 2600, temperature: 0 })) text += d; }
+  catch (e) { emit({ type: "status", text: `triage writer failed (${String(e.message).slice(0, 80)}); retrying with fewer facts` }); }
+  if (!text) { try { text = (await chat({ messages: [{ role: "system", content: system }, { role: "user", content: `TICKET:\n${ticket.body.slice(0, 3000)}\n\nFACTS:\n${JSON.stringify(shrink(structuredClone(shown), Math.floor(FACTS_BUDGET / 2)))}` }], max_tokens: 2600, temperature: 0 })).content || ""; } catch (e) { emit({ type: "error", code: "llm_failed", message: e.message }); } }
+  const out = extractTriage(text, facts.allowed_verdicts);
+  if (out.triage) {
+    if (out.downgraded) emit({ type: "status", text: `verdict "${out.triage.verdict_requested}" was not supported by the facts; downgraded to more_info` });
+    emit({ type: "triage", ...out.triage, allowed_verdicts: facts.allowed_verdicts, feature_confidence: facts.feature_confidence,
+           customer: { named: ticket.customer, companies: facts.companies }, features_found: facts.features.map(f => ({ name: f.name, share: f.share, why: f.why })),
+           switches: facts.switches.map(s => ({ config_key: s.config_key, name: s.name, effective: s.effective, source: s.source, for_customer: s.for_customer || null, read_in_feature: s.read_in_feature })),
+           guides: facts.guides.map(g => ({ title: g.title, heading: g.heading, path: g.path })), screens: facts.screens, owners: facts.owners, process_owners: facts.process_owners,
+           error_hits: facts.error_hits, quoted_text: ticket.errors, customer_live: facts.customer_live });
+  } else emit({ type: "status", text: `no triage card: ${out.dropped || "unknown"}` });
+  const known = pathsIn(json);
+  const clean = sanitizePaths(out.text || text || "(The model produced no triage text.)", known);
+  emit({ type: "token", text: clean.text });
+  emitContextPaths(json, emit);
+  await emitRefsFooter(refs, emit);
+  const summary = { type: "done", ms: Date.now() - t0, model: chatStream.lastModel || p.model, mode: "triage", verdict: out.triage?.verdict || null };
+  emit(summary);
+  return summary;
+}
 
 async function sqlRun({ question, refs, emit, t0, p }) {
   const ref = refs[0] || "main";

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Builds one "card" per entity from graph facts and embeds it. Content-addressed: a card whose
 // sha256 is unchanged is not re-embedded, so re-runs after a merge only touch what moved.
-//   node --env-file=.env src/embed-index.mjs [--repo procol-backend] [--ref main]
+//   node --env-file=.env src/embed-index.mjs [--repo procol-backend] [--ref main|<branch>|all]
+//   --ref all = every current branch of every repo (config/refs.json). Cards whose text already has a vector
+//   (the same symbol on another branch) copy it instead of re-embedding, so extra branches cost seconds.
 //        [--kinds FEATURE,HANDLER,DB_TABLE,HTTP_ENDPOINT,EXTERNAL_SERVICE,SYMBOL] [--limit N]
 import { createHash } from "node:crypto";
 import { q, pool } from "./db.mjs";
@@ -11,7 +13,7 @@ const argv = process.argv.slice(2);
 const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i === -1 ? d : argv[i + 1]; };
 const onlyRepo = arg("repo", null);
 const ref = arg("ref", "main");
-const KINDS = arg("kinds", "FEATURE,DOCUMENT,HANDLER,DB_TABLE,HTTP_ENDPOINT,EXTERNAL_SERVICE,HTTP_CALL_SITE,SYMBOL").split(",");
+const KINDS = arg("kinds", "FEATURE,DOCUMENT,HANDLER,DB_TABLE,HTTP_ENDPOINT,EXTERNAL_SERVICE,HTTP_CALL_SITE,SYMBOL,UI_ROUTE,UI_ACTION").split(",");
 const LIMIT = Number(arg("limit", "0"));
 
 // "Api::ActivityLogsController#index" -> "api activity logs controller index"
@@ -22,7 +24,9 @@ export const humanize = (s) => String(s || "")
 const sha256 = (s) => createHash("sha256").update(s).digest();
 
 async function latestCommits() {
-  const rows = await q(`select distinct on (r.id) r.id repo_id, r.name repo, encode(h.commit_sha,'hex') sha
+  if (ref === "all")
+    return q(`select distinct v.repo_id, v.repo, v.ref, v.commit as sha from ckg.v_refs v where ($1::text is null or v.repo=$1) order by v.repo, v.ref`, [onlyRepo]);
+  const rows = await q(`select distinct on (r.id) r.id repo_id, r.name repo, $1::text as ref, encode(h.commit_sha,'hex') sha
                           from ckg.ref_history h join ckg.repos r on r.id=h.repo_id
                          where h.ref_name=$1 and ($2::text is null or r.name=$2)
                          order by r.id, h.last_seen desc`, [ref, onlyRepo]);
@@ -84,6 +88,28 @@ async function cardsFor(kind, repoId, sha) {
       const dir = String(e.path || "").split("/").slice(0, -1).join("/");
       cards.set(e.id, `Frontend screen code in ${e.path} (${humanize(dir)}) calls backend API ${a.method || ""} ${a.pathTemplate || a.raw || ""} (${humanize(a.pathTemplate || "")}).`);
     }
+  } else if (kind === "UI_ROUTE") {
+    const acts = await q(`select g.src_entity_id sid, a.name, a.attrs->>'role' role from ckg.edges g join ckg.entities a on a.id=g.dst_entity_id
+                           where g.kind='DECLARES' and a.kind='UI_ACTION' and g.src_entity_id = any($1)`, [ids]);
+    const apis = await q(`select g.src_entity_id sid, cs.attrs->>'method' method, cs.attrs->>'pathTemplate' path from ckg.edges g join ckg.entities cs on cs.id=g.dst_entity_id
+                           where g.kind='ISSUES_HTTP' and g.src_entity_id = any($1)`, [ids]);
+    const navs = await q(`select g.src_entity_id sid, t.name from ckg.edges g join ckg.entities t on t.id=g.dst_entity_id where g.kind='NAVIGATES_TO' and g.src_entity_id = any($1)`, [ids]);
+    const grp = (rows, f) => { const m = new Map(); for (const r of rows) { const k = Number(r.sid); if (!m.has(k)) m.set(k, new Set()); m.get(k).add(f(r)); } return m; };
+    const A = grp(acts, r => r.name), P = grp(apis, r => `${r.method || ""} ${r.path || ""}`.trim()), N = grp(navs, r => r.name);
+    for (const e of ents) {
+      const a = e.attrs || {}, id = Number(e.id);
+      const parts = [`Screen "${e.name}" at ${a.route_path} in the buyer dashboard${a.parents?.length ? ` (under ${a.parents.join(" > ")})` : ""}.`];
+      if (a.keywords?.length) parts.push(`Also known as: ${a.keywords.join(", ")}.`);
+      if (A.get(id)?.size) parts.push(`Buttons and steps on this screen: ${[...A.get(id)].slice(0, 25).join(", ")}.`);
+      if (N.get(id)?.size) parts.push(`Leads to: ${[...N.get(id)].slice(0, 10).join(", ")}.`);
+      if (P.get(id)?.size) parts.push(`Talks to backend APIs: ${[...P.get(id)].slice(0, 12).join(", ")}.`);
+      cards.set(e.id, parts.join(" "));
+    }
+  } else if (kind === "UI_ACTION") {
+    for (const e of ents) {
+      const a = e.attrs || {};
+      cards.set(e.id, `${a.role === "step" ? "Wizard step" : a.role === "tab" ? "Tab" : a.role === "title" ? "Dialog" : "Button"} "${e.name}" on the ${a.screen ? `"${a.screen}" screen (${a.screen_path})` : "dashboard"} of the buyer app.`);
+    }
   } else if (kind === "DOCUMENT") {
     for (const e of ents) {
       const a = e.attrs || {};
@@ -120,18 +146,34 @@ async function main() {
   const model = embedModelId(), dims = embedDims();
   const repos = await latestCommits();
   if (!repos.length) throw new Error(`no indexed commit for ref ${ref}`);
-  let embedded = 0, skipped = 0;
-  const doneEndpoints = { done: false };
+  let embedded = 0, skipped = 0, reused = 0;
+  const doneEndpoints = new Set();
   for (const r of repos) {
     for (const kind of KINDS) {
-      if (kind === "HTTP_ENDPOINT") { if (doneEndpoints.done) continue; doneEndpoints.done = true; }
+      if (kind === "HTTP_ENDPOINT") { if (doneEndpoints.has(r.sha)) continue; doneEndpoints.add(r.sha); }
       const cards = await cardsFor(kind, r.repo_id, r.sha);
       if (!cards.length) continue;
       const existing = await q(`select entity_id, text_hash from ckg.embeddings where model=$1 and entity_id = any($2)`, [model, cards.map(c => c.id)]);
       const have = new Map(existing.map(x => [Number(x.entity_id), Buffer.from(x.text_hash).toString("hex")]));
-      const todo = cards.filter(c => have.get(c.id) !== sha256(c.card).toString("hex"));
+      let todo = cards.filter(c => have.get(c.id) !== sha256(c.card).toString("hex"));
       skipped += cards.length - todo.length;
       const tk = Date.now();
+      // same card text already embedded for another entity (another branch, same symbol): copy the vector
+      if (todo.length) {
+        const hashes = [...new Set(todo.map(c => sha256(c.card).toString("hex")))];
+        const known = await q(`select distinct on (text_hash) encode(text_hash,'hex') h, embedding::text v from ckg.embeddings where model=$1 and text_hash = any($2::bytea[])`,
+                              [model, hashes.map(h => Buffer.from(h, "hex"))]);
+        const vec = new Map(known.map(k => [k.h, k.v]));
+        const copy = todo.filter(c => vec.has(sha256(c.card).toString("hex")));
+        for (let i = 0; i < copy.length; i += 500) {
+          const b = copy.slice(i, i + 500);
+          const values = b.map((c, j) => `(${c.id}, $1, ${dims}, decode('${sha256(c.card).toString("hex")}','hex'), $${j + 2}, '${vec.get(sha256(c.card).toString("hex"))}'::vector)`).join(",");
+          await q(`insert into ckg.embeddings (entity_id, model, dims, text_hash, card, embedding) values ${values}
+                   on conflict (entity_id, model) do update set text_hash=excluded.text_hash, card=excluded.card, embedding=excluded.embedding, created_at=now()`, [model, ...b.map(c => c.card)]);
+        }
+        reused += copy.length;
+        todo = todo.filter(c => !vec.has(sha256(c.card).toString("hex")));
+      }
       for (let i = 0; i < todo.length; i += 256) {
         const batch = todo.slice(i, i + 256);
         const vecs = await embed(batch.map(b => b.card));
@@ -141,7 +183,7 @@ async function main() {
                    embedding=excluded.embedding, created_at=now()`, [model, ...batch.map(b => b.card)]);
         embedded += batch.length;
       }
-      console.log(`${r.repo.padEnd(24)} ${kind.padEnd(17)} ${String(cards.length).padStart(6)} cards  ${String(todo.length).padStart(6)} embedded  ${Date.now() - tk}ms`);
+      if (todo.length || ref === "all") console.log(`${(r.repo + "@" + r.ref).padEnd(40)} ${kind.padEnd(17)} ${String(cards.length).padStart(6)} cards  ${String(todo.length).padStart(6)} embedded  ${Date.now() - tk}ms`);
     }
   }
   // ---- documentation passages ----
@@ -156,7 +198,7 @@ async function main() {
       await q(`update ckg.doc_chunks set embedding=$3::vector, model=$4 where blob_sha=$1 and ordinal=$2`, [b[j].blob_sha, b[j].ordinal, toPgVector(vecs[j]), model]);
   }
   if (chunks.length) console.log(`${"documentation".padEnd(24)} ${"DOC_CHUNKS".padEnd(17)} ${String(chunks.length).padStart(6)} passages embedded  ${Date.now() - tc}ms`);
-  console.log(`\n${embedded} embedded, ${skipped} unchanged, ${chunks.length} doc passages, model ${model}, ${Date.now() - t0}ms`);
+  console.log(`\n${embedded} embedded, ${reused} copied from identical cards, ${skipped} unchanged, ${chunks.length} doc passages, model ${model}, ${Date.now() - t0}ms`);
   await pool.end();
 }
 main().catch(e => { console.error(e); process.exit(1); });

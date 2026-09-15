@@ -16,9 +16,15 @@ export const getAuthConfig = () => call("/api/auth/config");
 export const getMe = () => call("/api/me");
 export const login = (email, password) => post("/api/auth/login", { email, password });
 export const logout = () => post("/api/auth/logout");
+export const listChats = () => call("/api/chats");
+export const createChat = (title) => post("/api/chats", { title });
+export const getChat = (id) => call(`/api/chats/${id}`);
+export const renameChat = (id, title) => call(`/api/chats/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) });
+export const deleteChat = (id) => call(`/api/chats/${id}`, { method: "DELETE" });
+export const sendFeedback = (body) => post("/api/feedback", body);
 
 /** Streams typed events; returns an abort function. The role on the session decides the answer style. */
-export const askStream = ({ question, refs, onEvent, onError }) => {
+export const askStream = ({ question, refs, chatId = null, fresh = false, onEvent, onError }) => {
   const controller = new AbortController();
   (async () => {
     try {
@@ -26,7 +32,7 @@ export const askStream = ({ question, refs, onEvent, onError }) => {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ question, refs }),
+        body: JSON.stringify({ question, refs, ...(chatId ? { chat_id: chatId } : {}), ...(fresh ? { fresh: true } : {}) }),
         signal: controller.signal,
       });
       if (!res.ok) {

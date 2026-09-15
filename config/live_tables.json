@@ -2,54 +2,202 @@
   "_comment": "Allowlist for the live mirror of the platform (UAT) database. ONLY these tables and ONLY these columns are ever SELECTed; everything else never leaves UAT. `key` is the primary key, `cursor` the change column. `large` tables poll less often. Descriptions are shown to the planner so it knows what each table answers.",
   "tables": {
     "companies": {
-      "columns": ["id", "name", "status", "created_at", "updated_at"],
-      "key": "id", "cursor": "updated_at",
+      "columns": [
+        "id",
+        "name",
+        "status",
+        "created_at",
+        "updated_at"
+      ],
+      "key": "id",
+      "cursor": "updated_at",
       "describe": "tenant companies: id -> name. Join target for every company_id below. No contact or billing data."
     },
     "master_configurations": {
-      "columns": ["id", "config_key", "name", "item_type", "visibility", "defaults", "input_type", "depends_on", "data_set", "description", "status", "company_id", "created_at", "updated_at"],
-      "key": "id", "cursor": "updated_at",
+      "columns": [
+        "id",
+        "config_key",
+        "name",
+        "item_type",
+        "visibility",
+        "defaults",
+        "input_type",
+        "depends_on",
+        "data_set",
+        "description",
+        "status",
+        "company_id",
+        "created_at",
+        "updated_at"
+      ],
+      "key": "id",
+      "cursor": "updated_at",
       "describe": "the catalogue of every configuration switch: config_key, human name, description, default value (defaults jsonb), and which company it is scoped to (null = global default)."
     },
     "custom_configurations": {
-      "columns": ["id", "config_key", "item_type", "item_id", "modifications", "status", "company_id", "created_at", "updated_at"],
-      "key": "id", "cursor": "updated_at",
+      "columns": [
+        "id",
+        "config_key",
+        "item_type",
+        "item_id",
+        "modifications",
+        "status",
+        "company_id",
+        "created_at",
+        "updated_at"
+      ],
+      "key": "id",
+      "cursor": "updated_at",
       "describe": "per-company / per-template overrides of a config_key: `modifications` jsonb holds the value, status 1 = active, 0 = inactive. This is what is ON or OFF for whom."
     },
     "procol_variables": {
-      "columns": ["id", "key", "status", "created_at", "updated_at"],
-      "key": "id", "cursor": "updated_at",
+      "columns": [
+        "id",
+        "key",
+        "status",
+        "created_at",
+        "updated_at"
+      ],
+      "key": "id",
+      "cursor": "updated_at",
       "describe": "environment-level switches by key (value column deliberately NOT mirrored: it can hold secrets)."
     },
     "templates": {
-      "columns": ["id", "name", "template_for", "template_type", "company_id", "status", "order_type", "type_identifier", "configurations", "template_mappings", "created_at", "updated_at"],
-      "key": "id", "cursor": "updated_at",
-      "describe": "event/PR templates per company: name, type, status, and their configuration json. Widgets (the big layout json) are not mirrored."
+      "columns": [
+        "id",
+        "name",
+        "template_for",
+        "template_type",
+        "company_id",
+        "status",
+        "order_type",
+        "type_identifier",
+        "widgets",
+        "configurations",
+        "template_mappings",
+        "created_at",
+        "updated_at"
+      ],
+      "key": "id",
+      "cursor": "updated_at",
+      "describe": "event/PR/RFI templates per company: name, type, status, configuration json, and widgets json = the real layout (trade: groups of columns such as inline_components and global_price_components; RFI/onboarding/intake: pages of questions)."
     },
     "template_responses": {
-      "columns": ["id", "item_type", "item_id", "company_id", "template_id", "status", "approval_status", "placed_at", "created_at", "updated_at"],
-      "key": "id", "cursor": "updated_at", "large": true,
+      "columns": [
+        "id",
+        "item_type",
+        "item_id",
+        "company_id",
+        "template_id",
+        "status",
+        "approval_status",
+        "placed_at",
+        "created_at",
+        "updated_at"
+      ],
+      "key": "id",
+      "cursor": "updated_at",
+      "large": true,
       "describe": "metadata of filled templates (which template was used for which item, status, approval status). The filled-in commercial data is NOT mirrored."
     },
     "approval_flows": {
-      "columns": ["id", "company_id", "approval_id", "approval_identifiers", "approval_key", "approval_trigger_rule", "status", "config", "name", "description", "created_at", "updated_at"],
-      "key": "id", "cursor": "updated_at",
+      "columns": [
+        "id",
+        "company_id",
+        "approval_id",
+        "approval_identifiers",
+        "approval_key",
+        "approval_trigger_rule",
+        "status",
+        "config",
+        "name",
+        "description",
+        "created_at",
+        "updated_at"
+      ],
+      "key": "id",
+      "cursor": "updated_at",
       "describe": "approval routing per company: which approval_key triggers which flow, trigger rule, config json, status."
     },
     "approval_flow_conditions": {
-      "columns": ["id", "approval_condition_id", "approval_flow_id", "status", "trigger_values", "trigger_range", "created_at", "updated_at"],
-      "key": "id", "cursor": "updated_at",
+      "columns": [
+        "id",
+        "approval_condition_id",
+        "approval_flow_id",
+        "status",
+        "trigger_values",
+        "trigger_range",
+        "created_at",
+        "updated_at"
+      ],
+      "key": "id",
+      "cursor": "updated_at",
       "describe": "conditions attached to an approval flow and the values/ranges that trigger it."
     },
     "fx_datasources": {
-      "columns": ["id", "tenant_id", "name", "status", "key_attribute", "configuration", "created_at", "updated_at"],
-      "key": "id", "cursor": "updated_at",
+      "columns": [
+        "id",
+        "tenant_id",
+        "name",
+        "status",
+        "key_attribute",
+        "configuration",
+        "created_at",
+        "updated_at"
+      ],
+      "key": "id",
+      "cursor": "updated_at",
       "describe": "flexi-module datasources (custom tables) per tenant with their configuration json."
     },
     "fx_datasource_fields": {
-      "columns": ["id", "fx_datasource_id", "name", "data_type", "status", "field_type", "key_attribute", "validations", "created_at", "updated_at"],
-      "key": "id", "cursor": "updated_at", "large": true,
+      "columns": [
+        "id",
+        "fx_datasource_id",
+        "name",
+        "data_type",
+        "status",
+        "field_type",
+        "key_attribute",
+        "validations",
+        "created_at",
+        "updated_at"
+      ],
+      "key": "id",
+      "cursor": "updated_at",
+      "large": true,
       "describe": "fields of flexi datasources including `validations` jsonb -- business rules stored as data (3-way matching lives here)."
+    },
+    "template_widget_mappings": {
+      "columns": [
+        "id",
+        "template_id",
+        "widget_id",
+        "status",
+        "created_at",
+        "updated_at"
+      ],
+      "key": "id",
+      "cursor": "updated_at",
+      "describe": "which widgets (columns) a template shows; status 1 = active. Join templates.id = template_id and widgets.id = widget_id."
+    },
+    "widgets": {
+      "columns": [
+        "id",
+        "name",
+        "key_attribute",
+        "company_id",
+        "input_type",
+        "widget_type",
+        "config",
+        "status",
+        "type_identifier",
+        "category",
+        "created_at",
+        "updated_at"
+      ],
+      "key": "id",
+      "cursor": "updated_at",
+      "describe": "a template column: name, key, input_type (0 number,1 product,2 dropdown,3 percentage,4 formula,5 delivery_location,6 quantity,7 attachment,8 string,9 date), config json (prefix, suffix, is_required, field_type creator|participant, priority = column order, precision)."
     }
   }
 }

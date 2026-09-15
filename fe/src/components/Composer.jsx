@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
  * The question pill. Glass over the constellation, a rotating gradient hairline while focused or
  * busy, and a soft spotlight that follows the pointer. `/` focuses it from anywhere; Esc stops.
  */
-export default function Composer({ onSend, onStop, asking, disabled, autoFocus, inputRef, placeholder = "Ask about a file, an endpoint or a flow" }) {
+export default function Composer({ onSend, onStop, asking, disabled, autoFocus, inputRef, placeholder = "Ask about a file, an endpoint or a flow", mode = "ask", onModeToggle = null }) {
   const [value, setValue] = useState("");
   const [focused, setFocused] = useState(false);
   const localRef = useRef(null);
@@ -44,6 +44,11 @@ export default function Composer({ onSend, onStop, asking, disabled, autoFocus, 
       <span className="composer-ring" aria-hidden="true" />
       <span className="composer-spot" aria-hidden="true" />
       <div className="composer-body">
+        {onModeToggle && (
+          <button type="button" className={`mode-chip${mode === "ticket" ? " mode-chip--on" : ""}`} onClick={onModeToggle} title={mode === "ticket" ? "Ticket triage is on: pasted text is treated as a customer ticket" : "Turn on ticket triage"} aria-pressed={mode === "ticket"}>
+            {mode === "ticket" ? "Ticket" : "Ask"}
+          </button>
+        )}
         <textarea
           ref={ref}
           rows={1}
