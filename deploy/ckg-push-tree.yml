@@ -149,7 +149,9 @@ jobs:
           }))
           PY
 
-          SIG="sha256=$(openssl dgst -sha256 -hmac "$SECRET" -binary < /tmp/body.json | xxd -p -c 256)"
+          # openssl's own -hex, not `| xxd -p`: xxd ships with vim and is absent on plenty of
+          # hosts, which turns a missing package into a confusing 401 instead of a clear error.
+          SIG="sha256=$(openssl dgst -sha256 -hmac "$SECRET" -hex < /tmp/body.json | awk '{print $NF}')"
 
           ACCEPT=$(curl -fsS --max-time 300 -X POST "http://127.0.0.1:8788/index" \
             -H "content-type: application/json" \

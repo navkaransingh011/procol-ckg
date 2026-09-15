@@ -136,7 +136,7 @@ python3 -c "
 import base64, json
 print(json.dumps({'repo':'procol-backend','ref':'main','sha':'$SHA',
                   'bundle':base64.b64encode(open('/tmp/tree.bundle','rb').read()).decode()}))" > /tmp/body.json
-SIG="sha256=$(openssl dgst -sha256 -hmac "$INDEX_WEBHOOK_SECRET" -binary < /tmp/body.json | xxd -p -c 256)"
+SIG="sha256=$(openssl dgst -sha256 -hmac "$INDEX_WEBHOOK_SECRET" -hex < /tmp/body.json | awk '{print $NF}')"
 curl -fsS -X POST http://127.0.0.1:8788/index -H 'content-type: application/json' \
   -H "x-ckg-signature: $SIG" --data-binary @/tmp/body.json
 watch -n5 'curl -s http://127.0.0.1:8788/status'
