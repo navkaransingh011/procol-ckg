@@ -23,6 +23,18 @@ const MAX_BODY = Number(process.env.INDEX_MAX_BODY || 64 * 1024 * 1024);
 const KEEP = Number(process.env.INDEX_GC_KEEP || 5);
 const ROOT = path.resolve(process.env.CKG_REPO_DIR || path.join(os.homedir(), "procol-ckg"));
 
+// config/refs.json is the VM's own answer to "which refs may be indexed, and what are they".
+// Deliberately not taken from the request: a source repo's CI should not be able to invent a
+// tenant, or index a ref nobody agreed to carry, just by changing its own workflow file.
+async function loadRefs() {
+  try {
+    return JSON.parse(await fs.readFile(path.join(ROOT, "config/refs.json"), "utf8"));
+  } catch (e) {
+    console.error(`cannot read config/refs.json: ${e.message}`);
+    return {};
+  }
+}
+
 if (!SECRET) {
   console.error("INDEX_WEBHOOK_SECRET is required: without it anyone who can reach this port can write to the graph");
   process.exit(1);
@@ -187,11 +199,17 @@ http.createServer(async (req, res) => {
     return send(res, 400, { error: "invalid json" });
   }
 
-  const { repo, ref, sha, bundle, tenant = null, env = null } = payload;
+  const { repo, ref, sha, bundle } = payload;
   if (!repo || !ref || !sha || !bundle) return send(res, 400, { error: "repo, ref, sha and bundle are required" });
   if (!/^[0-9a-f]{40}$/i.test(sha)) return send(res, 400, { error: "sha must be a 40-char hex sha" });
   // No dots: repo becomes a path segment under the temp dir, and ".." would escape it.
   if (!/^[\w-]+$/.test(repo)) return send(res, 400, { error: "repo must be a bare name ([A-Za-z0-9_-])" });
+
+  // Allowlist, and the only source of tenant/env. A ref that is not in refs.json is rejected
+  // rather than indexed under a guess: an unknown tenant pollutes every tenant-scoped answer.
+  const known = (await loadRefs())[repo]?.find((r) => r.ref === ref);
+  if (!known) return send(res, 403, { error: `${repo}@${ref} is not in config/refs.json` });
+  const { tenant = null, env = null } = known;
 
   const job = {
     id: crypto.randomUUID().slice(0, 8),
