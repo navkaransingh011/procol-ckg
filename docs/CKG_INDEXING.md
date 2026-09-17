@@ -104,29 +104,59 @@ repo changes.
 
 Then, in that repo's Settings → Secrets and variables → Actions:
 
+Three secrets. The rest is either already in the repo or hardcoded in the workflow.
+
 | Kind | Name | Value |
 |---|---|---|
-| Secret | `GCP_WIF_PROVIDER` | same value procol-ckg uses |
-| Secret | `GCP_SERVICE_ACCOUNT` | `ckg-deployer@<project>.iam.gserviceaccount.com` |
-| Secret | `CKG_SSH_KEY` | private half of the VM's deploy keypair |
+| Secret | `CKG_GCP_SERVICE_ACCOUNT` | `ckg-deployer@<project>.iam.gserviceaccount.com` |
+| Secret | `CKG_SSH_KEY` | private half of the CI -> VM keypair (see below) |
 | Secret | `CKG_INDEX_SECRET` | the `INDEX_WEBHOOK_SECRET` from the VM's `.env` |
-| Variable | `GCP_PROJECT` | the graph VM's project id |
-| Variable | `VM_NAME` | `procol-ckg` |
-| Variable | `VM_ZONE` | `asia-south1-c` |
-| Variable | `VM_SSH_USER` | the VM's deploy user |
 
-The Workload Identity provider must trust this repository too. Its attribute condition is pinned
-to procol-ckg today, so widen it once to the set of repos that index:
+The workload identity **provider** is the source repo's existing `vars.GCP_WIF_PROVIDER` -- that
+pool already trusts the repo, so no second trust relationship has to be created or kept in step.
+The **identity** it impersonates is not the deployment service account: `ckg-deployer` can open an
+IAP tunnel to this VM and read compute metadata, nothing more, so a fault in this workflow cannot
+deploy anything. Check the provider variable's name per repo before copying the template; it
+differs.
+
+The VM's own coordinates are hardcoded in the workflow's `env:` block -- project, instance, zone
+and login user. Identifiers, not credentials. The trade is that moving the VM means a PR to the
+source repo instead of editing a variable; with one VM and gated reviews, that is the cheaper side.
+
+**`CKG_SSH_KEY` is not the VM's `~/.ssh/ckg_deploy`.** That one is the VM -> GitHub direction, used
+by `git pull`. This is CI -> VM: generate a keypair dedicated to the source repo, and APPEND its
+public half to the VM's instance `ssh-keys` metadata. `gcloud compute instances add-metadata
+ssh-keys=` replaces the entire list, so read the current value first or you delete the
+procol-ckg deploy key and break `deploy-vm.yml`. A per-repo key also means revoking one repo's
+access does not touch the others.
+
+### The one IAM binding
+
+`ckg-deployer` already holds `iap.tunnelResourceAccessor`, `compute.viewer` and `compute.osLogin`
+from the original setup in `docs/CI_DEPLOY.md`. What it does not yet allow is being impersonated
+from the SOURCE repo's pool. Confirm the pool maps the repository attribute:
 
 ```bash
-gcloud iam workload-identity-pools providers update-oidc github-provider \
-  --project "$PROJECT_ID" --location global --workload-identity-pool github \
-  --attribute-condition "assertion.repository in ['Procol-Tech/procol-ckg','Procol-Tech/procol-backend']"
-
-gcloud iam service-accounts add-iam-policy-binding "$SA" --project "$PROJECT_ID" \
-  --role roles/iam.workloadIdentityUser \
-  --member "principalSet://iam.googleapis.com/projects/${PROJECT_NUM}/locations/global/workloadIdentityPools/github/attribute.repository/Procol-Tech/procol-backend"
+gcloud iam workload-identity-pools providers describe github-provider \
+  --project procol-migration --location global --workload-identity-pool github-pool \
+  --format='value(attributeMapping,attributeCondition)'
 ```
+
+If `attribute.repository` is mapped, grant the binding:
+
+```bash
+PROJECT_NUM=1012597983394
+POOL=github-pool
+REPO=Procol-Tech/procol-backend
+gcloud iam service-accounts add-iam-policy-binding \
+  ckg-deployer@procol-migration.iam.gserviceaccount.com --project procol-migration \
+  --role roles/iam.workloadIdentityUser \
+  --member "principalSet://iam.googleapis.com/projects/${PROJECT_NUM}/locations/global/workloadIdentityPools/${POOL}/attribute.repository/${REPO}"
+```
+
+Scoped to one repository: no other repo sharing that pool can impersonate `ckg-deployer`. If the
+pool maps something else instead (`google.subject` only, say), the `principalSet` path must match
+that mapping -- read what the describe printed rather than guessing.
 
 No new firewall rule and no new port: the run tunnels to **22**, which `allow-iap-ssh` already
 permits from `35.235.240.0/20`, and forwards to the loopback 8788 from inside the VM.

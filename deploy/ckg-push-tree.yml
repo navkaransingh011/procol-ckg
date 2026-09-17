@@ -22,16 +22,30 @@
 # index endpoint stays bound to 127.0.0.1 on the VM and is never exposed to the internet.
 # Nothing long-lived is stored here except the SSH key; GitHub mints the GCP token per run.
 #
-# Required repository secrets:
-#   GCP_WIF_PROVIDER    projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
-#   GCP_SERVICE_ACCOUNT ckg-deployer@<project>.iam.gserviceaccount.com
-#   CKG_SSH_KEY         private half of the graph VM's deploy keypair
-#   CKG_INDEX_SECRET    same value as INDEX_WEBHOOK_SECRET in the VM's .env
-# Required repository variables:
-#   GCP_PROJECT         the graph VM's project id
-#   VM_NAME             procol-ckg
-#   VM_ZONE             asia-south1-c
-#   VM_SSH_USER         the VM's deploy user
+# Three repository secrets, all CKG_-prefixed so they cannot collide with the credentials this
+# repository's other workflows already use:
+#
+#   CKG_GCP_SERVICE_ACCOUNT ckg-deployer@<project>.iam.gserviceaccount.com
+#
+#   CKG_SSH_KEY       private half of the keypair whose PUBLIC half sits in the graph VM's instance
+#                     ssh-keys metadata. This is the CI -> VM direction; it is NOT the VM's own
+#                     GitHub deploy key (~/.ssh/ckg_deploy on the VM, used by git pull).
+#   CKG_INDEX_SECRET  same value as INDEX_WEBHOOK_SECRET in the graph VM's .env. A mismatch shows
+#                     up as 401 bad signature, not as a config error.
+#
+# The workload identity PROVIDER is this repository's existing vars.GCP_WIF_PROVIDER -- that pool
+# already trusts this repository, so there is no new trust relationship to create or keep in step.
+# The IDENTITY it impersonates is deliberately NOT the deployment service account: ckg-deployer
+# can open an IAP tunnel to the graph VM and read compute metadata, and nothing else. A fault or a
+# compromise in this workflow therefore cannot deploy anything. The deployment workflows' own
+# vars.GCP_WIF_SERVICE_ACCOUNT is left untouched.
+#
+# For this to work, ckg-deployer must allow impersonation from that pool for THIS repository
+# (a roles/iam.workloadIdentityUser binding on the service account, scoped to
+# attribute.repository/<owner>/<repo>) -- one command, in docs/CKG_INDEXING.md in procol-ckg.
+#
+# The graph VM's own coordinates are hardcoded in the `env:` block below. They are identifiers,
+# not credentials, and keeping them in the file makes the pipeline self-describing.
 name: CKG push tree
 
 on:
@@ -46,6 +60,13 @@ concurrency:
   # the graph indexes whole-tree snapshots, so only the newest commit is worth sending.
   group: ckg-push-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  # Where the graph lives. Identifiers only; the two credentials are repository secrets.
+  CKG_GCP_PROJECT: procol-migration
+  CKG_VM_NAME: procol-ckg
+  CKG_VM_ZONE: asia-south1-c
+  CKG_VM_SSH_USER: navkaran_singh
 
 permissions:
   contents: read
@@ -92,12 +113,12 @@ jobs:
       - id: auth
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.CKG_GCP_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@v2
         with:
-          project_id: ${{ vars.GCP_PROJECT }}
+          project_id: ${{ env.CKG_GCP_PROJECT }}
 
       # Tunnel, forward, POST and poll must share ONE step: a backgrounded process started in
       # one `run:` block does not survive into the next, because each step is its own shell.
@@ -105,9 +126,9 @@ jobs:
         env:
           SECRET:  ${{ secrets.CKG_INDEX_SECRET }}
           SSH_KEY: ${{ secrets.CKG_SSH_KEY }}
-          VM_NAME: ${{ vars.VM_NAME }}
-          VM_ZONE: ${{ vars.VM_ZONE }}
-          VM_USER: ${{ vars.VM_SSH_USER }}
+          VM_NAME: ${{ env.CKG_VM_NAME }}
+          VM_ZONE: ${{ env.CKG_VM_ZONE }}
+          VM_USER: ${{ env.CKG_VM_SSH_USER }}
           REPO:    ${{ github.event.repository.name }}
           REF:     ${{ github.ref_name }}
           SHA:     ${{ github.sha }}
