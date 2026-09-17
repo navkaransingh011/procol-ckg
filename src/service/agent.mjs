@@ -6,6 +6,7 @@
 import { redactFacts } from "./policy.mjs";
 import { FLOW_RULES, wantsFlow, extractFlow } from "./flow.mjs";
 import { needsContext, resolveFollowUp, CONVERSATION_RULE } from "./followup.mjs";
+import { assessConfidence, clearTop } from "./confidence.mjs";
 import { templateView, screenView, screenJourney, screensNamedIn } from "../tools.mjs";
 import { configFor, companiesWith, companyMentions } from "./configs.mjs";
 import { looksLikeTicket, parseTicket, collectTriageFacts, TRIAGE_SYSTEM, extractTriage } from "./triage.mjs";
@@ -85,7 +86,7 @@ const norm = (s) => String(s || "").toLowerCase().replace(/[^\p{L}\p{N}#./:_-]+/
  * Cache in front of the real run. Key = question (normalised) + style + the exact commits in scope, so a
  * re-index misses on its own. Replays the stored event stream in ~ms with one leading status line.
  */
-const CACHE_VERSION = 3;   // 3: template previews styled like the platform sheet
+const CACHE_VERSION = 4;   // 4: calibrated confidence, gated side facts, no approximate-match disclaimer (3: platform-styled template previews)
 export async function ask({ question: asked, refs = ["main"], emit, style = "auto", fresh = false, policy = null, history = null }) {
   const p0 = provider();
   // Inside a chat, a follow-up is rewritten into a standalone question from what earlier turns made explicit.
@@ -464,6 +465,11 @@ async function guidedRun({ question, refs, emit, t0, p, intent = "code", policy 
     // what people WROTE the system should do, next to what the code DOES (DOCUMENTED: intent, not proof)
     documents: documents.slice(0, 3).map(d => ({ ...d, text: d.text.slice(0, 900) })),
   };
+  {
+    const c = assessConfidence({ lookups: [{ match: found.weak ? "approximate" : "exact", matched_on: token, anchor: { kind: seed.kind, name: seed.name || seed.fqn } }],
+                                 documents, unresolved: (fwd.unresolved ?? []).length, truncated: !!fwd.truncated });
+    facts.confidence = { level: c.level, reason: c.reason, ...(c.missing ? { missing: c.missing } : {}) };
+  }
 
   const prompt = `Write a short answer to the question using ONLY the JSON facts below.
 
@@ -475,7 +481,10 @@ STRICT RULES
 - If "truncated" is true, say the trace was bounded.
 - If "hubs_not_expanded" is non-empty, name them and say they were skipped because too
   many things call them.
-- If "approximate_match" is true, open by saying the match was approximate.
+- "confidence" was computed from how the facts were found. On "high" state things as fact, with no hedging
+  words (seems, appears, may, likely). On "medium" or "low" add ONE sentence at the end naming the missing
+  piece ("confidence.missing"). Never open with a disclaimer about the match: "approximate_match" only means
+  the name was matched loosely. Never write "I found", "the closest thing", "may not be exactly" or "the graph".
 - Write for a colleague, not a log: describe what the code does and where. Do NOT narrate the
   mechanics -- never write "the anchor is", "the unresolved list is empty", "truncated is false",
   "no hubs were skipped", "the match was exact". Mention unresolved/truncated/hubs ONLY when they
@@ -491,6 +500,7 @@ STRICT RULES
 FACTS
 ${JSON.stringify(policy ? redactFacts(facts, policy) : facts, null, 1).slice(0, 12000)}`;
 
+  emit({ type: "status", text: `confidence ${facts.confidence.level}: ${facts.confidence.reason}` });
   emit({ type: "status", text: `writing the ${intent === "simple" ? "plain-English" : ""} answer (${p.model})`.replace("  ", " ") });
   const guidedSystem = intent === "simple"
     ? "You explain software to a non-engineer in plain, warm English. Use ONLY the JSON facts. Lead with what the user does and what happens. Prefer product words over code words. 3-5 sentences, then an optional short 'In the code' line naming real files from the facts. Invent nothing; if the facts fall short, say so."
@@ -523,7 +533,7 @@ ${JSON.stringify(policy ? redactFacts(facts, policy) : facts, null, 1).slice(0, 
   emitContextPaths(JSON.stringify(facts), emit);
   await emitRefsFooter(refs, emit);
   const summary = { type: "done", claim_count: claims.length + documents.length, evidence_count: ev.evidence.length + documents.length,
-                    tool_calls: 5, unresolved_count: (fwd.unresolved ?? []).length,
+                    tool_calls: 5, unresolved_count: (fwd.unresolved ?? []).length, confidence: facts.confidence.level,
                     refs, provider: `${p.base} · ${p.model}`, mode: "guided", ms: Date.now() - t0 };
   emit(summary);
   return summary;
@@ -622,6 +632,14 @@ Rules for lookups (max 8):
 const ANSWER_SYSTEM = `You are a senior engineer answering questions about Procol's codebase from a VERIFIED code
 knowledge graph. You will receive FACTS as JSON. You know nothing about this codebase except those facts.
 
+CONFIDENCE -- facts.confidence was computed from HOW the facts were retrieved; your wording follows it
+- level "high": state the answer plainly, as fact. No hedging words (seems, appears, may, likely, possibly).
+- level "medium": answer plainly, then one sentence naming the weaker link (facts.confidence.missing) where it matters.
+- level "low": say what the facts do show, then ONE sentence stating the missing piece (facts.confidence.missing).
+  Do not pad a low-confidence answer with adjacent facts to make it look fuller.
+- Never write boilerplate about your own certainty, and never invent a caveat the facts do not carry.
+- Section 6 copies facts.confidence.level and its reason; do not grade yourself differently.
+
 HOW TO READ THE FACTS
 - A list's "by_subkind" splits the set by subtype. EXTERNAL_SERVICE mixes runtime integrations
   (path lib/external_api) with CI actions (subkind github_action) -- never report a combined count as
@@ -641,7 +659,9 @@ HOW TO READ THE FACTS
 - Each lookup has an "anchor" (the node matched), "downstream" (execution path hops, each with kind, name,
   path, line, the edge that led there, "edge_resolution" = how the CONNECTION is known, and
   "node_resolution" = how the NODE is known), "upstream_callers", optional "columns", "defects",
-  "unresolved", "truncated", "hubs_not_expanded", and "match" (exact | approximate | none).
+  "unresolved", "truncated", "hubs_not_expanded", and "match" (exact | approximate | none). "match" says how the
+  anchor was FOUND (an exact name, a loosely matched token, nothing) -- a retrieval detail, not a verdict on
+  relevance; facts.confidence has already weighed it.
 - For a CALLS hop, edge_resolution is what matters: RUNTIME means that call was OBSERVED during a real test run.
   If the hop also carries "observed_at", the observation was made on that earlier commit and carried forward
   because both files are unchanged since -- say "observed in tests at <observed_at>; code unchanged since".
@@ -659,9 +679,9 @@ DOCUMENTS -- what people WROTE the system should do (business logic), next to wh
   commit (source "repo"), or uploaded business documents such as PRDs and process docs (source "upload").
   Cite them as <path> § <heading>. Their resolution is DOCUMENTED: intent, not proof.
 - When the question is about business rules or intended behaviour, lead with the documented rule, then
-  state what the code shows, and say explicitly whether they AGREE, CONFLICT, or whether the code side is
-  simply not visible in the facts. A conflict is a finding -- name both sides. Code facts (source, routes,
-  runtime calls) win over a document when they disagree; say the doc may be stale.
+  state what the code shows. If they DIFFER, that is a finding: one line naming both sides; code facts (source,
+  routes, runtime calls) win, and the doc may be stale. If they agree, do not say so -- answer once. If the code
+  side is not in the facts, say that in one clause, not a paragraph.
 - Never treat a document as proof that code exists. A doc naming a method is a MENTION, not a definition.
 
 LIVE PLATFORM DATA -- the CURRENT configuration, from a read-only mirror of the UAT database
@@ -690,12 +710,13 @@ LIVE PLATFORM DATA -- the CURRENT configuration, from a read-only mirror of the 
 - Nodes of kind UI_ROUTE are dashboard screens (name + route path) and UI_ACTION are the buttons, wizard steps, tabs and dialogs on them
   (attrs.screen says which screen). For "how do I / where do I / walk me through" questions, describe the journey as screens and clicks in order,
   using these names exactly; then say what happens in the system after each click. Edges NAVIGATES_TO say which screen leads to which.
-- "live_candidates" are platform rows (templates, approval flows, datasources) closest in meaning to the question,
-  with the company they belong to. Use them to name the actual template/flow the question is about.
-- "config_candidates" are the configuration switches closest IN MEANING to the question (key, human name, description,
-  default, how many companies have an override on). When the question asks "which config / what is the setting for X",
-  answer with the top candidate by key AND human name, its default, who has it on, and where the code reads it
-  (live_config_greps). If the top two are close, name both and say which fits better and why. Never invent a key.
+- "live_candidates" (platform rows: templates, approval flows, datasources, with their company) and "config_candidates"
+  (configuration switches: key, human name, description, default, how many companies have it on) are present ONLY
+  when the question is about configuration or platform state -- at most two, ranked by meaning. Use them to name the
+  actual template, flow or switch the question is about. For "which config / what is the setting for X": the top
+  candidate by key AND human name, its default, who has it on, and where the code reads it (live_config_greps); if the
+  two are close, name both and say which fits better. Never invent a key. When they are absent, the question was not
+  about state: do not bring configuration or approval-flow counts into the answer.
 - Three sources, three roles: documents = the intended rule; code = how it is enforced; live = who has it on now.
   Keep them distinct in the answer, and never present live state as the rule or the rule as the state.
 
@@ -719,28 +740,36 @@ WHAT THE GRAPH CANNOT TELL YOU -- be explicit about this
   evidence that a call does not happen.
 
 ANSWER FORMAT (use these headings, keep it tight)
-1. Answer -- 2-5 sentences that directly answer the question.
+1. Answer -- 2-3 sentences that directly answer the question, stated as fact when confidence is high.
 2. Evidence path -- numbered hops. Each hop: kind, name, path:line, and [RUNTIME] / [EXACT] / [HEURISTIC]
    where it matters. Frontend -> endpoint -> route -> handler -> methods -> data.
 3. Data & side effects -- tables, columns, external services touched, if any appear in the facts.
    Only DB_TABLE nodes are tables (snake_case names from db/schema.rb). A Ruby class such as Workflow or
    Approval is a MODEL -- label it "model", never "table".
 4. Known defects on this path -- summary, root cause, fix, from defect records; or "none recorded".
-5. What the graph cannot tell you -- concrete gaps, and the exact file:line to open to close each one.
+5. Not covered -- concrete gaps in the indexed code, and the exact file:line to open to close each one.
    The file you point at MUST appear in the facts. If the facts hold no such file, describe the thing
    ("the Bid model") without a path -- never guess a path, not even with "likely" or "probably".
-6. Confidence -- high / medium / low, with one reason.
+6. Confidence -- facts.confidence.level and its reason, as given.
 
 HARD RULES
-- If the lookup that answers the question has match "approximate", the Answer section MUST open with:
-  "The closest match in the graph is <anchor name> (approximate match on '<matched_on>'); the graph did not
-  contain <what was asked>." Never present an approximate match as if it were the thing asked about.
+- A lookup with match "approximate" was found by a loosely matched token, not an exact name. That is NOT a reason
+  to open with a disclaimer: answer about what was found, and only when facts.confidence is "low" add one closing
+  sentence such as "This is based on <anchor name>; if you meant something else, name the screen, file or feature."
+  When screen_journey is present, the journey is the subject and the fuzzy flag on lookups is irrelevant.
 - Never invent a file, line, method, table, or route. Every named artifact must appear in the facts.
 - If a lookup has match "none", say "no node matched <q>" -- do not fill the gap from general Rails/React knowledge.
 - If "unresolved" is non-empty, say the trace stops there and why.
 - If "truncated" is true or "hubs_not_expanded" is non-empty, say so.
 - Name the refs read: they are in facts.refs. Tenants run different code.
-- Prefer precision over completeness. A shorter correct answer beats a longer padded one.
+- Prefer precision over completeness. A shorter correct answer beats a longer padded one. Side facts -- endpoints
+  and jobs not on the path asked about (a retrigger endpoint, a background job), counts of approval flows or
+  configurations, other companies' settings -- appear ONLY when the question asks for them.
+- Say each thing once. Never write the same sequence twice (prose, then an arrow list): the steps live in the
+  Evidence path; section 1 states the outcome.
+- Banned phrases: "I found", "the closest thing", "may not be exactly", "the graph", "the facts show",
+  "based on the facts", "it seems", "appears to". Say "the indexed code" when you must refer to the index, and
+  state findings directly.
 - THIS SYSTEM IS READ-ONLY. It cannot change, enable, disable, create or delete anything -- not code, not
   configuration, not platform data -- and it has no connection that could. If the question asks for a change,
   say plainly that you cannot and only report the current state, then say where a human would make the change
@@ -761,38 +790,59 @@ const ANSWER_SIMPLE_SYSTEM = `You explain how Procol's software works to a NON-E
 or product person. You are given FACTS as JSON pulled from a verified code knowledge graph. You know nothing
 about this product except those facts.
 
-WRITE LIKE THIS
-- Plain, warm, direct English. Short sentences. No jargon. Explain any unavoidable term in a few words.
-- Lead with what a USER can do and what happens for them, step by step in plain language.
-- Prefer product words (an approval, a bid, a supplier, a screen) over code words (controller, endpoint, model).
-- Use the "overviews" facts first when present -- they are written for this audience. Then add specifics.
-- "documents" are what the team WROTE about how things should work (design docs, PRDs, process docs). When
-  present, explain the intended behaviour from them in plain words, then say whether the code agrees. If the
-  doc and the code disagree, say so plainly -- that is exactly what a CS or product person needs to know.
-  Name the document by its title (and section) so they can open it.
+SHAPE OF THE ANSWER -- always in this order, each part once
+1. The answer: two or three plain sentences that answer the question directly. No preamble, no "here is the flow".
+2. The steps, ONLY if the question is about a process or journey: one numbered list, one step per line, in the
+   order the person experiences them -- the screen, the click, what happens next. Take them from "screen_journey"
+   when present (its hops are real clicks read from the dashboard code), else from "documents" or "overviews".
+   Write the sequence once: never a prose walkthrough AND an arrow list of the same steps.
+3. One line ONLY if the documents and the code differ on something: what the document says, what the code does.
+   If they agree, write nothing about agreement. Name the document by its title so they can open it.
+4. Optionally, if the person asked where in the code or how it is enforced: an "In the code" line naming 1-3
+   real files from the facts. Otherwise leave it out.
+Plain, warm, direct English. Short sentences. No headings, no evidence tables. Product words (an approval, a bid,
+a supplier, a screen) over code words (controller, endpoint, model). Explain any unavoidable term in a few words.
+
+CONFIDENCE -- facts.confidence was computed from how the facts were found; your wording follows it
+- "high": state it as fact. No hedging words (seems, appears, may, likely, possibly, I think).
+- "medium": state it plainly, then one sentence on the weaker link (facts.confidence.missing) if it matters.
+- "low": say what IS covered, then ONE sentence stating the missing piece (facts.confidence.missing), for example
+  "The approval step itself is not covered in the indexed documents." Then stop. Do not pad with adjacent facts
+  to make the answer look fuller.
+- Never write boilerplate about your own certainty, and never invent a caveat the facts do not carry.
+
+WHAT THE FACTS ARE
+- "overviews" are written for this audience: use them first, then add specifics.
+- "screen_journey" and "screens" are real dashboard screens, the clicks between them and the key actions on each.
+  Use their names exactly.
+- "documents" are what the team WROTE about how things should work (design docs, PRDs, process docs).
 - "live" rows are the current configuration on UAT (not production) as of the time shown: who has what switched
   on, which templates and approval flows exist. Say the time and "on UAT". Status 1 means on, 0 off.
-- If a live entry has "full_table_shown_to_user": true, the person can already see the complete table of ALL those
-  rows under your answer (every one of "total"; the rows you were given are only a sample). Give the exact count,
-  describe what is in it in a few sentences, then say "see the table below". Never claim the table shows fewer rows.
-- "config_candidates" are the switches closest in meaning to what was asked. When asked which setting does X,
-  name the best one by its key and its plain name, say its default and how many companies have it on, and
-  where in the code it is checked. Never invent a key that is not in the facts.
-- Describe the flow as a short story: the person does X on a screen, the system checks Y, then Z happens,
-  and the result is stored so it can be shown later.
-- 4 to 8 sentences, then optionally a short "In the code" line naming 1-3 real files for an engineer who
-  wants to look, taken ONLY from the facts. No headings, no numbered sections, no evidence tables.
+- If a live entry has "full_table_shown_to_user": true, the person already sees the complete table of ALL those
+  rows under your answer (every one of "total"; you were given a sample). Give the exact count, describe what is
+  in it in a few sentences, then say "see the table below". Never claim the table shows fewer rows.
+- "config_candidates" and "live_candidates" are present ONLY when the question is about a setting or platform
+  state, at most two. When asked which setting does X, name the best one by its key and its plain name, say its
+  default and how many companies have it on. Never invent a key that is not in the facts.
+- "effective_configuration" is what a named customer actually has on or off, with where each value comes from.
+- "template_views" is a template as the dashboard lays it out; the person already sees it rendered.
 
 HARD RULES -- these keep it honest
-- Use ONLY the facts. Never invent a feature, screen, file, number, or behaviour. If the facts do not cover
-  part of the question, say plainly "the graph does not show that part" and stop -- do not fill it from
-  general knowledge of how such software usually works.
-- If the main match is approximate (match: "approximate"), open with "The closest thing I found is <name>,
-  which may not be exactly what you asked about," then explain that.
-- If nothing matched (match: "none" everywhere), say you could not find it in the indexed code and suggest
-  rephrasing with a feature or screen name. Do not guess.
+- Use ONLY the facts. Never invent a feature, screen, file, number, or behaviour. If part of the question is not
+  covered, say so in one sentence ("<that part> is not covered in the indexed code or documents") and stop -- do
+  not fill it from general knowledge of how such software usually works.
+- Side facts appear ONLY when asked: API paths, retrigger or background jobs, counts of approval flows or
+  configurations, other companies' settings, and anything that merely sounds related. A journey answer never
+  mentions how many approval flows or switches exist.
+- A "match: approximate" on a lookup means the code was found by a similar name. It is NOT a reason for a
+  disclaimer: answer about what was found, and only when facts.confidence is "low" end with one sentence such as
+  "This is based on the Awarding screen; if you meant another screen, name it." When "screen_journey" is present,
+  the journey is the subject and that flag does not matter.
+- If nothing matched (match "none" everywhere, no journey, no documents), say you could not find it and suggest
+  asking with a feature or screen name. Do not guess.
+- Banned words and phrases: "I found", "the closest thing", "may not be exactly", "the graph", "the facts",
+  "based on the facts", "it seems", "appears to", "the anchor", "unresolved", "truncated", "hops", "the trace".
 - Every file you name in the optional "In the code" line must appear in the facts.
-- Do NOT narrate the machinery: never write "the anchor", "unresolved", "truncated", "hops", "the trace".
 - You can only READ. If asked to change, switch on/off, add or remove anything, say you cannot do that here,
   report what the current state is, and point to where a person would change it.`;
 
@@ -1051,25 +1101,31 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
   // Configuration questions: find the switch by MEANING over the live catalogue before planning, so the
   // planner works from real keys ("fx_response_sequence_advisory_lock_enabled") instead of guessing substrings.
   const CONFIG_RE = /\b(config(uration)?s?|setting|switch|flag|toggle|enabled?|disabled?|turn(ed)? (on|off)|lock|master config|custom config|default value|feature (on|off))\b/i;
-  // The live layer is searched by meaning on EVERY question (~10 ms each): the config catalogue, and the names of
-  // templates, approval flows, datasources and environment switches. Thresholds keep unrelated rows out.
-  let configs = [], liveHits = [];
-  const [cfgRes, liveRes0] = await Promise.all([
+  // The live layer is searched by meaning (~10 ms each): the config catalogue, and the names of templates, approval
+  // flows, datasources and environment switches. These are SIDE CHANNELS: they reach the planner and the writer only
+  // when the question is about platform state (configuration words, a named customer, a live entity) or when the
+  // planner asks for live data -- otherwise a row that merely sounds similar becomes padding in the answer
+  // ("77 approval flows for create_trade" under a question about the awarding journey).
+  const STATE_RE = /\b(config(uration)?s?|settings?|switch(es)?|flags?|toggles?|enabled?|disabled?|turn(ed)? (on|off)|switch(ed)? (on|off)|defaults?|master config|custom config|feature flag|templates?|approval (flows?|keys?)|datasources?|procol variables?|compan(y|ies)|customers?|tenants?|clients?|who has|which (companies|clients|customers|tenants)|on uat)\b/i;
+  let configs = [], liveHits = [], mentioned = [];
+  const [cfgRes, liveRes0, mentionedRes] = await Promise.all([
     searchConfigs({ question, k: 6, min_score: CONFIG_RE.test(question) ? 0.55 : 0.62 }).catch(() => ({ configs: [] })),
     searchLive({ question, k: 6, min_score: 0.6 }).catch(() => ({ hits: [] })),
+    companyMentions(question).catch(() => []),
   ]);
-  configs = cfgRes.configs || []; liveHits = liveRes0.hits || [];
-  if (configs.length) emit({ type: "status", text: `configuration switches by meaning: ${configs.slice(0, 3).map(c => c.config_key).join(" · ")}` });
-  if (liveHits.length) emit({ type: "status", text: `live rows by meaning: ${liveHits.slice(0, 3).map(h => `${h.kind}#${h.ref_id} ${h.text.slice(0, 40)}`).join(" · ")}` });
+  configs = cfgRes.configs || []; liveHits = liveRes0.hits || []; mentioned = mentionedRes || [];
+  const stateQuestion = STATE_RE.test(question) || mentioned.length > 0;
+  // the planner sees a few more than the writer will: it needs exact keys and ids to write live queries
+  const plannerConfigs = stateQuestion ? configs.slice(0, 4) : [], plannerLive = stateQuestion ? liveHits.slice(0, 4) : [];
   const candText = (sem.length
     ? "\n\nCANDIDATE NODES (real graph names ranked by meaning; use their exact names as lookups when they fit):\n"
       + sem.map(m => `- ${m.kind} | ${m.name || m.fqn} | ${m.path || ""}`).join("\n")
-    : "") + (liveHits.length
+    : "") + (plannerLive.length
     ? "\n\nCANDIDATE LIVE ROWS (real rows from the platform mirror, ranked by meaning; query them by id with where{} instead of guessing names):\n"
-      + liveHits.map(h => `- ${h.kind} id=${h.ref_id}${h.company ? ` | company ${h.company}` : ""} | ${h.text.slice(0, 90)}`).join("\n")
-    : "") + (configs.length
+      + plannerLive.map(h => `- ${h.kind} id=${h.ref_id}${h.company ? ` | company ${h.company}` : ""} | ${h.text.slice(0, 90)}`).join("\n")
+    : "") + (plannerConfigs.length
     ? "\n\nCANDIDATE CONFIGS (real config_keys from the live catalogue, ranked by meaning -- use these exact keys in live where{} filters; do not guess substrings):\n"
-      + configs.map(c => `- ${c.config_key} | "${c.name || ""}" | default ${JSON.stringify(c.defaults)} | on for ${c.companies_active} companies`).join("\n")
+      + plannerConfigs.map(c => `- ${c.config_key} | "${c.name || ""}" | default ${JSON.stringify(c.defaults)} | on for ${c.companies_active} companies`).join("\n")
     : "");
 
   // Phase A: plan
@@ -1082,6 +1138,19 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
     plan = extractJson(m.content || "");
     if (chatStream.lastModel && chatStream.lastModel !== p.model) emit({ type: "status", text: `planner: primary model produced nothing in time; plan came from fallback ${chatStream.lastModel}` });
   } catch (e) { emit({ type: "status", text: `planner failed (${String(e.message).slice(0, 120)}); using identifiers and candidates` }); }
+
+  // SIDE FACTS -- the switches and rows found by meaning reach the writer only when asked for (by the planner or by the
+  // wording), and then only the top two that stand clear of the rest. Template previews keep the raw hits (they are
+  // rendered, not narrated, and already need the word "template").
+  const rawLive = liveHits;
+  const planAskedLive = !!((plan?.live && plan.live.length) || (Array.isArray(plan?.config_for) && plan.config_for.length) || (Array.isArray(plan?.companies_with) && plan.companies_with.length));
+  const sideAllowed = planAskedLive || stateQuestion;
+  const cfgTop = sideAllowed ? clearTop(configs, c => Number(c.score), { floor: CONFIG_RE.test(question) ? 0.55 : 0.62, lenient: planAskedLive || CONFIG_RE.test(question) }) : { kept: [], dropped: configs.length, flat: false };
+  const liveTop = sideAllowed ? clearTop(liveHits, h => Number(h.score), { floor: 0.62, lenient: planAskedLive }) : { kept: [], dropped: liveHits.length, flat: false };
+  configs = cfgTop.kept; liveHits = liveTop.kept;   // from here on, only what the writer may see
+  if (configs.length) emit({ type: "status", text: `configuration switches by meaning: ${configs.map(c => c.config_key).join(" · ")}${cfgTop.dropped ? ` (${cfgTop.dropped} weaker left out)` : ""}` });
+  if (liveHits.length) emit({ type: "status", text: `live rows by meaning: ${liveHits.map(h => `${h.kind}#${h.ref_id} ${h.text.slice(0, 40)}`).join(" · ")}${liveTop.dropped ? ` (${liveTop.dropped} weaker left out)` : ""}` });
+  if (!sideAllowed && (cfgTop.dropped || liveTop.dropped)) emit({ type: "status", text: `left out ${cfgTop.dropped + liveTop.dropped} switches and platform rows that only sound similar: the question is not about configuration or platform state` });
 
   const lookups = [];
   const have = new Set();
@@ -1154,7 +1223,6 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
   const configForSpecs = (Array.isArray(plan?.config_for) ? plan.config_for : []).filter(x => x && (x.company || x.company_ids)).slice(0, 2);
   const CONFIG_WORDS = /\b(config|configs|configuration|configurations|setting|settings|switch|switches|enabled|disabled|turned (on|off)|switched (on|off)|\bon\b|\boff\b|default|defaults|allow|allowed|feature flag)/i;
   if (!configForSpecs.length && CONFIG_WORDS.test(question)) {
-    const mentioned = await companyMentions(question).catch(() => []);
     if (mentioned.length) configForSpecs.push({ company_ids: [...new Set(mentioned.map(m => m.id))].slice(0, 6), company: mentioned[0].mention,
                                                 only: /\b(off|disabled|switched off|turned off|not enabled)\b/i.test(question) ? "off" : /\b(on|enabled|switched on|turned on|active)\b/i.test(question) ? "on" : /\boverrid/i.test(question) ? "overrides" : null,
                                                 keys_like: (configs[0]?.config_key && /\b[a-z_]{6,}\b/.test(configs[0].config_key) ? null : null) });
@@ -1184,7 +1252,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
   const templateViews = [];
   if (/\btemplates?\b/i.test(question)) {
     const fromPlan = live.filter(l => l.table === "templates" && !l.error && (l.rows_shown_to_user || l.rows?.length || 0) <= 3).flatMap(l => (l.rows || []).map(r => r.id));
-    const fromHits = liveHits.filter(h => h.kind === "templates" && h.score >= 0.55).map(h => h.ref_id);
+    const fromHits = rawLive.filter(h => h.kind === "templates" && h.score >= 0.55).map(h => h.ref_id);
     const ids = [...new Set([...fromPlan, ...fromHits].map(Number).filter(Number.isInteger))].slice(0, 2);
     for (const id of ids) {
       const v = await templateView({ id }).catch(() => null);
@@ -1317,7 +1385,13 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
     } catch (e) { emit({ type: "status", text: `screen journey unavailable: ${String(e.message).slice(0, 60)}` }); }
   }
 
+  // CONFIDENCE -- from how the facts were found, never from the model's tone; the writer's wording follows it.
+  const journeyQuestion = JOURNEY_RE.test(question);
+  const confidence = assessConfidence({ lookups: results, screen_journey: screenJourneyFacts, screens: screenViews, documents, live, source,
+                                        effective_configuration: effectiveConfigViews, companies_with: companiesWithViews, lists, planned_sql: sqlResults, sem,
+                                        planAskedLive, journeyQuestion, unresolved: results.reduce((a, r) => a + (r.unresolved?.length || 0), 0), truncated: results.some(r => r.truncated) });
   const facts = { question, refs,
+                  confidence: { level: confidence.level, reason: confidence.reason, ...(confidence.missing ? { missing: confidence.missing } : {}) },
                   ...(conversation ? { conversation } : {}),
                   ...(screenJourneyFacts ? { screen_journey: screenJourneyFacts } : {}),
                   ...(screenViews.length ? { screens: screenViews.slice(0, 5) } : {}),
@@ -1337,14 +1411,17 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
                         ...(v.layout === "form"
                           ? { pages: v.pages.map(p => ({ page: p.name, questions: p.questions.slice(0, 40).map(q => ({ q: q.name, type: q.type, side: q.side, required: q.required, ...(q.options ? { options: q.options } : {}) })) })) }
                           : { columns: v.groups.map(g => ({ group: g.label, widgets: g.widgets.slice(0, 60).map(w => ({ name: w.name, type: w.type, side: w.side, required: w.required, prefix: w.prefix, suffix: w.suffix, hidden: w.hidden || undefined })) })) }) })) } : {}),
-                  ...(liveHits.length ? { live_candidates: liveHits.map(h => ({ table: h.kind, id: h.ref_id, company: h.company, text: h.text, match_score: h.score })) } : {}),
+                  ...(liveHits.length ? { live_candidates: liveHits.map(h => ({ table: h.kind, id: h.ref_id, company: h.company, text: h.text, match_score: h.score })),
+                                          ...(liveTop.flat ? { live_candidates_note: "scores are flat: weak hints only; the lookups and live rows decide" } : {}) } : {}),
                   ...(configs.length ? { config_candidates: configs.map(c => ({ config_key: c.config_key, name: c.name, description: c.description, default: c.defaults, item_type: c.item_type,
-                                                                              overrides: c.overrides, companies_with_it_on: c.companies_active, match_score: c.score })) } : {}),
+                                                                              overrides: c.overrides, companies_with_it_on: c.companies_active, match_score: c.score })),
+                                         ...(cfgTop.flat ? { config_candidates_note: "scores are flat: weak hints only; the lookups, live rows and where the code reads each key decide" } : {}) } : {}),
                   ...(summaries ? { overviews: summaries } : {}), ...(owners ? { owners } : {}) };
 
   // Phase C: answer (bounded payload, one retry)
   const retrieveMs = Date.now() - tRetrieve;
   emitContextPaths(JSON.stringify(facts), emit);
+  emit({ type: "status", text: `confidence ${confidence.level}: ${confidence.reason}` });
   emit({ type: "status", text: `writing the ${intent === "simple" ? "plain-English" : "technical"} answer (${p.model})` });
   const tAnswer = Date.now();
   const drawFlow = wantsFlow(question) && (results.some(r => r.match !== "none") || documents.length > 0 || live.length > 0);
@@ -1361,6 +1438,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
                     evidence_count: [...seen].filter(k => k.startsWith("ev:")).length, tool_calls: results.length * 3 + 1,
                     unresolved_count: results.reduce((a, r) => a + (r.unresolved?.length || 0), 0),
                     timings: { plan_ms: planMs, retrieve_ms: retrieveMs, answer_ms: answerMs },
+                    confidence: confidence.level, side_facts: { configs: configs.length, live_rows: liveHits.length, left_out: cfgTop.dropped + liveTop.dropped },
                     lookups, matched, refs, provider: `${p.base} · ${p.model}`, mode: "plan", ms: Date.now() - t0 };
   emit(summary);
   return summary;

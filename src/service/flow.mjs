@@ -15,6 +15,7 @@ After the prose, append exactly one fenced block starting with \`\`\`flow and en
 - ref (optional): the exact name of the code symbol, document, configuration key or approval flow in FACTS that this step comes from. Never invent one.
 - source (optional): code, document, config or live, saying which kind of fact the step rests on.
 - In the prose, end each sentence that describes a step with its marker in square brackets, like [s2]. Markers only for steps that exist.
+  When the answer has a numbered step list, the markers go on those list items, one per item; never stack several markers on one sentence.
 - If the facts do not support at least 3 steps, write the prose only and add no block.`;
 
 const ACTORS = new Set(["buyer", "supplier", "approver", "system", "admin"]);

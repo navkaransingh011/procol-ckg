@@ -159,7 +159,7 @@ export default function App() {
         {!live && (
           <div className="hero">
             <p className="eyebrow">Procol · Code Graph</p>
-            <h1>Ask the <em>codebase</em>.</h1>
+            <h1>Ask the <em>knowledge base</em>.</h1>
             <p>{g.me.can?.paths
               ? "Every answer names the file and line that proves it, and says so when it cannot tell."
               : "Every answer is grounded in the code, the documents and live platform data, and says so when it cannot tell."}</p>

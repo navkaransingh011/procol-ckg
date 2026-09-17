@@ -1,0 +1,1356 @@
+{
+ "slides": [
+  {
+   "type": "title",
+   "eyebrow": "Procol · Engineering",
+   "title": "Ask the codebase.",
+   "subtitle": "A knowledge graph and AI agent over Procol's code, documents and live platform configuration, built so CS, product and engineers get answers that name their evidence.",
+   "footer": "Panel review · 17 September 2026 · numbers measured on the working database on 16 Sep",
+   "notes": "Open with the one-line promise: every answer names the file, the guide or the live row that proves it, and says so when it cannot tell. Then say the deck is honest about what is not built yet: slides 20 to 22."
+  },
+  {
+   "type": "bullets",
+   "eyebrow": "The problem",
+   "title": "Platform knowledge lives in five places; questions land on engineers",
+   "columns": [
+    {
+     "heading": "Where the truth is today",
+     "items": [
+      [
+       "Three repositories.",
+       "Rails backend, buyer dashboard, supplier bidding app, each on several tenant branches"
+      ],
+      [
+       "Guides and PRDs",
+       "in Notion, Drive and people's heads"
+      ],
+      [
+       "Configuration",
+       "in the platform database: 435 company-level switches, 19,544 active overrides"
+      ],
+      [
+       "Screens and clicks",
+       "only in the React code, never written down"
+      ],
+      [
+       "Tribal memory",
+       "of who built what"
+      ]
+     ]
+    },
+    {
+     "heading": "What that costs",
+     "items": [
+      [
+       "CS waits on engineers",
+       "for 'what does this setting do for Reliance'"
+      ],
+      [
+       "Engineers context-switch",
+       "to answer the same questions"
+      ],
+      [
+       "Generic assistants guess.",
+       "They cannot see our code, our configs or our branches, and they do not say when they are wrong"
+      ],
+      [
+       "Nobody can say",
+       "which branch, which tenant, which environment an answer applies to"
+      ]
+     ]
+    }
+   ],
+   "note": "Numbers on this slide come from the UAT mirror on 16 Sep 2026."
+  },
+  {
+   "type": "architecture",
+   "eyebrow": "What we built",
+   "title": "One graph, one database, one agent",
+   "sources": [
+    {
+     "label": "procol-backend",
+     "sub": "Rails · 3 branches"
+    },
+    {
+     "label": "Dashboards",
+     "sub": "React · buyer + supplier"
+    },
+    {
+     "label": "Documents",
+     "sub": "16 guides uploaded, 158 in-repo"
+    },
+    {
+     "label": "UAT platform DB",
+     "sub": "12 tables, read-only",
+     "live": true
+    }
+   ],
+   "pipeline": [
+    {
+     "label": "7 extractors",
+     "sub": "Ruby AST, routes, schema, FE calls, screens, docs"
+    },
+    {
+     "label": "Indexer",
+     "sub": "per commit, append-only, cached by blob"
+    },
+    {
+     "label": "Embeddings",
+     "sub": "local model, 74,261 vectors"
+    },
+    {
+     "label": "Poller",
+     "sub": "every 60 s, SELECT-only"
+    }
+   ],
+   "graph": {
+    "label": "Knowledge graph",
+    "items": [
+     "83,911 facts",
+     "208,399 relationships",
+     "9 branches · 3 repos",
+     "334,139 live rows",
+     "681 MB in Postgres",
+     "no source leaves the VM"
+    ]
+   },
+   "agent": [
+    {
+     "label": "Agent service",
+     "sub": "planner · parallel retrieval · writer · guards",
+     "accent": true
+    },
+    {
+     "label": "Web UI",
+     "sub": "chats, cards, tables, diagrams"
+    },
+    {
+     "label": "Roles",
+     "sub": "cs · product · qa · engineer"
+    },
+    {
+     "label": "Audit log",
+     "sub": "who asked what, 47 questions so far"
+    }
+   ],
+   "note": "Everything runs on one GCP VM: Node service, Postgres with pgvector, nginx. The model is reached through Procol's Slingring gateway; embeddings are computed locally.",
+   "notes": "Walk left to right. Stress: the model never writes structural facts; it only reads what the service hands it."
+  },
+  {
+   "type": "numbers",
+   "eyebrow": "At a glance",
+   "title": "The graph today",
+   "tiles": [
+    {
+     "value": "83,911",
+     "label": "facts (entities)",
+     "sub": "classes, methods, routes, tables, screens, buttons, documents"
+    },
+    {
+     "value": "208,399",
+     "label": "relationships (edges)",
+     "sub": "declares, serves, targets, navigates, owns, mentions"
+    },
+    {
+     "value": "9",
+     "label": "deployed branches indexed",
+     "sub": "3 repos · production, UAT, Reliance, RFX QA"
+    },
+    {
+     "value": "96%",
+     "label": "parse cache hit",
+     "sub": "a re-index of the backend: 6,436 files in 1.65 s"
+    },
+    {
+     "value": "88%",
+     "label": "front-end API calls matched to a backend route",
+     "sub": "371 of 422 endpoints; 51 dead calls found"
+    },
+    {
+     "value": "100%",
+     "label": "embedding coverage",
+     "sub": "every branch, every document passage, every switch"
+    }
+   ],
+   "note": "Measured with SQL against the working database on 16 Sep 2026."
+  },
+  {
+   "type": "cards",
+   "eyebrow": "Three layers on every question",
+   "title": "Code, documents and live configuration, searched together by meaning",
+   "cards": [
+    {
+     "title": "Code graph",
+     "status": "exists",
+     "body": [
+      "24,025 Ruby symbols on the backend UAT branch",
+      "1,699 routes · 804 handlers · 165 tables",
+      "711 dashboard API call sites",
+      "123 screens · 509 buttons and steps",
+      "98% of handlers bridged to their Ruby method"
+     ]
+    },
+    {
+     "title": "Documents",
+     "status": "partial",
+     "body": [
+      "174 document nodes, 2,073 passages",
+      "16 uploaded guides (~31,500 words)",
+      "683 code mentions linked from in-repo docs",
+      "Answers say agree / conflict / not visible",
+      "0 PRDs attached to commits so far"
+     ]
+    },
+    {
+     "title": "Live platform mirror",
+     "status": "live",
+     "body": [
+      "12 tables, 112 allow-listed columns",
+      "334,139 rows, refreshed every 60 s",
+      "502 switches and 28,015 rows indexed by meaning",
+      "Read-only session + SELECT-only guard",
+      "UAT only; production is not mirrored"
+     ]
+    }
+   ],
+   "note": "Every question runs semantic search over all three layers before the planner decides what to fetch."
+  },
+  {
+   "type": "bullets",
+   "eyebrow": "How indexing works",
+   "title": "Git already fingerprints every file; we use that as the cache key",
+   "columns": [
+    {
+     "heading": "The mechanism",
+     "items": [
+      [
+       "Content-addressed.",
+       "Each file's blob SHA keys its parsed facts; an unchanged file is never parsed twice, across branches and commits"
+      ],
+      [
+       "Per commit.",
+       "Entities and edges are rows under the exact commit, so 'on RIL prod' and 'on UAT' are different, exact questions"
+      ],
+      [
+       "Append-only.",
+       "A new commit inserts; it never updates or deletes older rows. History is what remains"
+      ],
+      [
+       "Deployed branches only.",
+       "config/refs.json lists nine refs; the other ~2,100 branches never enter the graph"
+      ],
+      [
+       "Self-contained.",
+       "10,658 source blobs (2.17 M lines) are stored in Postgres, so answering needs no clone"
+      ]
+     ]
+    },
+    {
+     "heading": "What it buys",
+     "items": [
+      [
+       "Speed:",
+       "96% cache hit on backfill; a full re-index of the backend in 1.65 s"
+      ],
+      [
+       "Storage:",
+       "28,352 file instances across 14 commits collapse to 11,020 distinct blobs"
+      ],
+      [
+       "Safety:",
+       "secrets paths are dropped before any read; the model's DB role is SELECT-only"
+      ],
+      [
+       "Cross-repo joins:",
+       "shared endpoint nodes connect a dashboard call to the Rails action that serves it, no resolver pass needed"
+      ]
+     ]
+    }
+   ],
+   "size": 13
+  },
+  {
+   "type": "table",
+   "eyebrow": "Branches in the knowledge base",
+   "title": "Nine deployed branches, each answerable on its own",
+   "col_widths": [
+    3.0,
+    2.6,
+    2.6,
+    1.7,
+    2.2
+   ],
+   "rows": [
+    [
+     "Repository",
+     "Branch",
+     "Tenant · environment",
+     "Facts",
+     "Note"
+    ],
+    [
+     "procol-backend",
+     "main",
+     "shared · production",
+     "26,773",
+     "bootstrap import + extractors"
+    ],
+    [
+     "procol-backend",
+     "main-uat-test",
+     "shared · UAT",
+     "26,807",
+     "fully extractor-generated"
+    ],
+    [
+     "procol-backend",
+     "reliance-main",
+     "RIL · production",
+     "18,857",
+     "re-indexed with the AST extractor"
+    ],
+    [
+     "procol-client-dashboard",
+     "main",
+     "Procol · production",
+     "1,347",
+     "screens and clicks included"
+    ],
+    [
+     "procol-client-dashboard",
+     "fe-main-uat-test",
+     "Procol · UAT",
+     "1,363",
+     ""
+    ],
+    [
+     "procol-client-dashboard",
+     "rfx-qa-main",
+     "Procol · QA",
+     "708",
+     ""
+    ],
+    [
+     "procol-client-dashboard",
+     "reliance-main",
+     "RIL · production",
+     "597",
+     ""
+    ],
+    [
+     "procol-client-dashboard",
+     "ril-dev-final",
+     "RIL · dev",
+     "599",
+     ""
+    ],
+    [
+     "web-bidding",
+     "main",
+     "Procol · production",
+     "163",
+     "supplier app; no screen layer yet"
+    ]
+   ],
+   "size": 10.5,
+   "row_h": 0.34,
+   "note": "Five older dashboard branches were removed from the graph this week at the team's request. Adding a branch is a config edit plus one indexing run."
+  },
+  {
+   "type": "table",
+   "eyebrow": "What we extract",
+   "title": "Seven extractors turn source into facts",
+   "col_widths": [
+    2.1,
+    3.7,
+    2.6,
+    3.7
+   ],
+   "rows": [
+    [
+     "Extractor",
+     "Produces",
+     "Count (current branches)",
+     "Quality / limits"
+    ],
+    [
+     "be-ast (Ruby)",
+     "classes, modules, methods, associations",
+     "24,025 symbols (UAT backend)",
+     "5,450 files via real AST, 41 via regex fallback, 0 failures"
+    ],
+    [
+     "be-routes",
+     "routes and the handlers that serve them",
+     "1,699 routes · 804 handlers",
+     "expands Rails DSL without booting Rails"
+    ],
+    [
+     "be-schema",
+     "database tables and columns",
+     "165 tables",
+     "from db/schema.rb"
+    ],
+    [
+     "be-external",
+     "third-party services and gems",
+     "39 services",
+     "hosts and config keys"
+    ],
+    [
+     "fe-http",
+     "dashboard API call sites → endpoints",
+     "711 call sites, 486 resolved",
+     "regex based: 31.6% unresolved (bare identifiers)"
+    ],
+    [
+     "fe-screens",
+     "screens, buttons, steps, navigation",
+     "123 screens · 509 actions · 195 links",
+     "labels from en.json; runtime-built labels invisible"
+    ],
+    [
+     "docs",
+     "document nodes, passages, code mentions",
+     "174 documents · 2,073 passages",
+     "headings drive chunking"
+    ]
+   ],
+   "size": 10.5,
+   "row_h": 0.5,
+   "note": "Bumping an extractor's version re-parses every file it handles on the next run; nothing else changes."
+  },
+  {
+   "type": "flow",
+   "eyebrow": "How an answer is produced",
+   "title": "The service finds the facts; the model only writes",
+   "steps": [
+    {
+     "label": "Question",
+     "caption": "typed by anyone; role and chat history come from the session"
+    },
+    {
+     "label": "Understand",
+     "time": "0–3 s",
+     "caption": "follow-ups rewritten into standalone questions; semantic candidates from all three layers"
+    },
+    {
+     "label": "Plan",
+     "time": "1–3 s",
+     "caption": "the model lists lookups, live queries and greps as JSON; the service runs them"
+    },
+    {
+     "label": "Retrieve",
+     "time": "~0.2 s",
+     "accent": true,
+     "caption": "graph lookups, document passages, live rows, screen journeys, source lines, all in parallel"
+    },
+    {
+     "label": "Write",
+     "time": "3–25 s",
+     "caption": "the model writes from the facts JSON only, in the role's language"
+    },
+    {
+     "label": "Guard",
+     "caption": "paths not in the facts are removed; role filter on every event; complete tables shown as tables"
+    }
+   ],
+   "below": {
+    "heading": "Measured on the last 41 uncached questions",
+    "items": [
+     [
+      "p50 11.6 s, p90 23.7 s,",
+      "max 34.2 s; cached replays answer in 3–7 ms"
+     ],
+     [
+      "Resilience:",
+      "streaming with a 12 s first-token deadline, a hedged fallback model, a circuit breaker and retries, because the shared gateway stalls"
+     ]
+    ]
+   }
+  },
+  {
+   "type": "status",
+   "eyebrow": "Honesty is engineered, not prompted",
+   "title": "What stops the agent from making things up",
+   "columns": [
+    {
+     "heading": "Mechanisms in the service",
+     "items": [
+      {
+       "status": "exists",
+       "text": "Any file path the model names that was not in its facts is replaced before display"
+      },
+      {
+       "status": "exists",
+       "text": "'The graph does not show…' is a first-class answer; unresolved hops are listed, never hidden"
+      },
+      {
+       "status": "exists",
+       "text": "Complete result sets are rendered as tables; the prose may only summarise them"
+      },
+      {
+       "status": "exists",
+       "text": "Workflow diagram steps must reference facts the model was given, or they are dropped"
+      },
+      {
+       "status": "exists",
+       "text": "Triage verdicts are limited to the set the facts allow; others are downgraded"
+      },
+      {
+       "status": "exists",
+       "text": "Every answer ends with the exact commits it was read from"
+      }
+     ]
+    },
+    {
+     "heading": "Measured",
+     "items": [
+      {
+       "status": "exists",
+       "text": "Eval: 7 of 7 scored questions cite a real file, invent no path and name the branch"
+      },
+      {
+       "status": "exists",
+       "text": "5 of 5 saved CS answers contain zero code names, paths or code events"
+      },
+      {
+       "status": "partial",
+       "text": "Path guard applies to plan and triage answers; the sub-second guided path relies on its narrower prompt"
+      },
+      {
+       "status": "partial",
+       "text": "No judge-based scoring of answer quality yet; the eval checks honesty properties, not correctness"
+      },
+      {
+       "status": "missing",
+       "text": "Neither tests nor eval run in CI"
+      }
+     ]
+    }
+   ],
+   "note": "Honesty properties are properties of the code path, so they hold for any model behind the gateway."
+  },
+  {
+   "type": "cards",
+   "eyebrow": "Live platform data",
+   "title": "A read-only mirror of the UAT platform, one minute behind",
+   "cards": [
+    {
+     "title": "What is mirrored",
+     "status": "live",
+     "body": [
+      "companies, master and custom configurations",
+      "templates with their full widget layout",
+      "approval flows and conditions",
+      "flexi datasources and fields, procol variables",
+      "12 tables · 112 columns · 334,139 rows"
+     ]
+    },
+    {
+     "title": "How it stays safe",
+     "status": "exists",
+     "body": [
+      "Connection opens with read-only transactions",
+      "A guard rejects anything but SELECT (11 forbidden statements tested)",
+      "Column allow-list; no contact or billing data",
+      "'Change this config' is impossible, not discouraged",
+      "The agent refuses and says so"
+     ]
+    },
+    {
+     "title": "What it is not",
+     "status": "partial",
+     "body": [
+      "UAT, not production: values can differ",
+      "Read-only is enforced by the app, not by a DB role on the UAT side",
+      "No alert when the mirror goes stale",
+      "Freshness shown as 'as of' on every table"
+     ]
+    }
+   ],
+   "note": "Ask for a SELECT-only database role on UAT and a production read replica; both are configuration, not code."
+  },
+  {
+   "type": "table",
+   "eyebrow": "Sign-in and roles",
+   "title": "Same question, four answers: the role decides what is shown",
+   "col_widths": [
+    3.4,
+    1.9,
+    1.9,
+    1.9,
+    2.4
+   ],
+   "rows": [
+    [
+     "Layer",
+     "CS",
+     "Product",
+     "QA",
+     "Engineer"
+    ],
+    [
+     "Guides, PRDs, live configuration, templates",
+     "yes",
+     "yes",
+     "yes",
+     "yes"
+    ],
+    [
+     "Endpoints and routes",
+     "no",
+     "no",
+     "yes",
+     "yes"
+    ],
+    [
+     "Class, method, model names",
+     "no",
+     "no",
+     "names only",
+     "yes"
+    ],
+    [
+     "File paths and line numbers",
+     "no",
+     "no",
+     "no",
+     "yes"
+    ],
+    [
+     "Source snippets, grep, read",
+     "no",
+     "no",
+     "no",
+     "yes"
+    ],
+    [
+     "Branches",
+     "main",
+     "main",
+     "all",
+     "all"
+    ]
+   ],
+   "size": 11,
+   "row_h": 0.4,
+   "note": "Enforced at retrieval (restricted roles never read source), on the facts handed to the model, on every streamed event, and in the answer cache key. Email + password sign-in with scrypt hashes; role changes apply on the next request; every question is logged with email and role. Google SSO was removed pending a hostname with TLS."
+  },
+  {
+   "type": "cards",
+   "eyebrow": "Product-facing answers",
+   "title": "Not just prose: the objects people actually work with",
+   "cards": [
+    {
+     "title": "Template preview",
+     "status": "exists",
+     "body": [
+      "Drawn with the platform sheet's own measurements",
+      "4,792 of 5,341 templates drawable (89.7%)",
+      "Sheets, RFI forms and field maps",
+      "Real labels, units, required marks; sample values illustrative"
+     ],
+     "size": 11
+    },
+    {
+     "title": "Workflow diagram",
+     "status": "exists",
+     "body": [
+      "Beside the answer for 'how does X work'",
+      "Steps in product language, actors coloured",
+      "Every step validated against the facts",
+      "Walks itself once, then follows the reader"
+     ],
+     "size": 11
+    },
+    {
+     "title": "Journeys as screens",
+     "status": "partial",
+     "body": [
+      "Purchase Requisition → New Event → Awarding → PO",
+      "From the dashboard's own navigation code",
+      "195 screen links; the click is known for 11",
+      "Supplier app has no screen layer yet"
+     ],
+     "size": 11
+    },
+    {
+     "title": "Complete tables",
+     "status": "exists",
+     "body": [
+      "'List all X' returns every row, up to 500",
+      "Columns follow the question",
+      "Stamped with the mirror's time",
+      "Copy as TSV"
+     ],
+     "size": 11
+    }
+   ],
+   "per_row": 4
+  },
+  {
+   "type": "numbers",
+   "eyebrow": "The screen layer",
+   "title": "Screens and clicks are facts in the graph now",
+   "tiles": [
+    {
+     "value": "123",
+     "label": "dashboard screens",
+     "sub": "from the route table, with breadcrumbs and permissions"
+    },
+    {
+     "value": "509",
+     "label": "buttons, steps, tabs, dialogs",
+     "sub": "labels resolved from the translation file"
+    },
+    {
+     "value": "195",
+     "label": "screen-to-screen links",
+     "sub": "184 between screens, 11 tied to the button that triggers them"
+    },
+    {
+     "value": "22.5%",
+     "label": "API call sites attached to a screen",
+     "sub": "the rest sit in the Redux layer, which has no extractor yet"
+    },
+    {
+     "value": "47",
+     "label": "screens with no known link in or out",
+     "sub": "navigation computed at runtime is invisible to a regex"
+    },
+    {
+     "value": "0",
+     "label": "supplier-app screens",
+     "sub": "web-bidding uses a different structure; not extracted yet"
+    }
+   ],
+   "note": "Kept current with every index run; a Redux/state extractor is the next step to lift the 22.5%."
+  },
+  {
+   "type": "bullets",
+   "eyebrow": "Saved chats and follow-ups",
+   "title": "Conversations are personal, replayable and understood in context",
+   "columns": [
+    {
+     "heading": "Built",
+     "items": [
+      [
+       "Saved per person.",
+       "Every turn is stored with its event stream gzipped (4.4× smaller measured); reopening redraws prose, trace, tables, template and diagram exactly"
+      ],
+      [
+       "Follow-ups understood.",
+       "'And for Reliance?' is rewritten into a standalone question from the last six turns, at minimal model effort; the person sees 'understood as'"
+      ],
+      [
+       "Context, not evidence.",
+       "The writer is told the conversation may explain what the person means, never serve as a fact"
+      ],
+      [
+       "Retention.",
+       "Replay events are pruned after 180 days; question and answer text stay"
+      ],
+      [
+       "Ask again.",
+       "A saved answer is a snapshot; one click re-runs it against today's data"
+      ]
+     ]
+    },
+    {
+     "heading": "Not yet",
+     "items": [
+      [
+       "No shared chat links;",
+       "chats are strictly personal"
+      ],
+      [
+       "Replay is not re-filtered",
+       "if a person's role changes later"
+      ],
+      [
+       "No self-service password reset,",
+       "no admin UI for accounts"
+      ],
+      [
+       "9 chats, 10 turns",
+       "so far: usage is days old"
+      ]
+     ]
+    }
+   ],
+   "size": 13
+  },
+  {
+   "type": "cards",
+   "eyebrow": "Two CS-shaped features",
+   "title": "Per-customer configuration and ticket triage",
+   "cards": [
+    {
+     "title": "What is on for Reliance?",
+     "status": "exists",
+     "body": [
+      "Resolves a customer's switches exactly as the platform does: default ← company master ← active override (rule taken from the Rails model)",
+      "435 global switches, 19,544 active overrides across 16,291 companies",
+      "Names repeat (two 'RELIANCE INDUSTRIES LIMITED'), so company ids are always shown and agreement vs difference is separated",
+      "Reverse direction: which companies have X on, with the same precedence"
+     ],
+     "size": 11.5
+    },
+    {
+     "title": "Ticket triage",
+     "status": "partial",
+     "body": [
+      "Paste a complaint → customer, likely feature with confidence, governing switches with effective values, guides, screens, owners from commit history",
+      "Verdict: CS can resolve · needs a config change · needs engineering · need more information",
+      "The verdict is chosen only from the set the facts allow; a switch at its default proves nothing",
+      "Accuracy unmeasured: 3 written examples (2 of 3 as expected); needs 20 real anonymised tickets; HubSpot lookup not built"
+     ],
+     "size": 11.5
+    }
+   ],
+   "per_row": 2,
+   "note": "Both read the UAT mirror; production values must be confirmed until a production replica exists."
+  },
+  {
+   "type": "numbers",
+   "eyebrow": "Latency and accuracy today",
+   "title": "Fast enough to use; honest by construction; not yet fully measured",
+   "tiles": [
+    {
+     "value": "11.6 s",
+     "label": "median answer, uncached",
+     "sub": "p90 23.7 s · max 34.2 s · n = 41 real questions"
+    },
+    {
+     "value": "3–7 ms",
+     "label": "cached replay",
+     "sub": "cache keyed by question, role and commits; live-data answers expire after 1 h"
+    },
+    {
+     "value": "7 / 7",
+     "label": "honesty checks passed in the eval",
+     "sub": "cites a real file, no invented paths, names the branch"
+    },
+    {
+     "value": "7 / 8",
+     "label": "plain-English questions anchored",
+     "sub": "planner + semantic candidates; 0 / 8 by name alone"
+    },
+    {
+     "value": "47",
+     "label": "real questions asked so far",
+     "sub": "5 people, 14–16 Sep; 46 answered without error"
+    },
+    {
+     "value": "2 / 3",
+     "label": "triage examples as expected",
+     "sub": "written examples, not real tickets; unmeasured"
+    }
+   ],
+   "note": "The eval set is 8 engineer-shaped questions; there are none yet for CS journeys, templates, configuration or follow-ups."
+  },
+  {
+   "type": "status",
+   "eyebrow": "Deployment and operations",
+   "title": "One VM: the agent deploys on merge, the graph is still indexed by hand",
+   "columns": [
+    {
+     "heading": "Running",
+     "items": [
+      {
+       "status": "exists",
+       "text": "GCP VM (Debian, Postgres 17 + pgvector, nginx → Node service) with systemd units for the agent and the live poller"
+      },
+      {
+       "status": "exists",
+       "text": "Merge to main deploys the agent: pull, build, migrate, restart, health check, roll back on failure (WIF + IAP, no keys)"
+      },
+      {
+       "status": "exists",
+       "text": "67 tests in 17 files pass; migrations 001–019 chained in one command"
+      },
+      {
+       "status": "exists",
+       "text": "Bootstrap database dump in the repo; teammate runbooks for VM load and update"
+      },
+      {
+       "status": "exists",
+       "text": "Business documents in the repo are re-ingested on every deploy"
+      }
+     ]
+    },
+    {
+     "heading": "Not yet",
+     "items": [
+      {
+       "status": "partial",
+       "text": "Push-model indexing on merge (bundle → HMAC endpoint → index, embed, gc) is built and documented but has not indexed anything yet"
+      },
+      {
+       "status": "missing",
+       "text": "VM indexing of new commits is still a manual command; so is embedding after it"
+      },
+      {
+       "status": "missing",
+       "text": "No monitoring, alerting or scheduled backups; chat backup is a documented command"
+      },
+      {
+       "status": "missing",
+       "text": "Tests and eval do not run in CI"
+      },
+      {
+       "status": "missing",
+       "text": "Runtime call evidence needs a tracer harness that lives outside this repo"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "bullets",
+   "eyebrow": "Live demo",
+   "title": "Six questions, one story",
+   "columns": [
+    {
+     "heading": "As Customer Success",
+     "items": [
+      [
+       "1.",
+       "\"Which master configs are on by default?\" → complete table of 78 rows, plain-English summary"
+      ],
+      [
+       "2.",
+       "\"And which of those are switched off for Reliance?\" → understood as a standalone question; per-company effective values with ids"
+      ],
+      [
+       "3.",
+       "\"Walk me through the buyer journey from a purchase request to the PO\" → screens and clicks from the code, workflow diagram beside it"
+      ],
+      [
+       "4.",
+       "Paste a ticket → triage card: customer, feature, switches, guide, owner, verdict"
+      ]
+     ]
+    },
+    {
+     "heading": "As Engineer",
+     "items": [
+      [
+       "5.",
+       "\"What happens when GET /activity_logs is called?\" → controller, serializer, files and lines, trace graph"
+      ],
+      [
+       "6.",
+       "\"Show me the RFQ Template - Materials used by GMMCO\" → the template drawn as the platform draws it, columns and price components"
+      ],
+      [
+       "Then",
+       "sign out and sign in as CS to show the same template question with no code anywhere"
+      ]
+     ]
+    }
+   ],
+   "size": 13,
+   "note": "Every demo answer is reproducible on the laptop; latency is 5–15 s for plain questions and 15–30 s for technical ones when the gateway is healthy."
+  },
+  {
+   "type": "section",
+   "eyebrow": "The honest part",
+   "title": "What does not exist yet",
+   "subtitle": "Two slides of gaps, ordered by how much they limit the answers, each verified by reading the code and the database on 16 September."
+  },
+  {
+   "type": "status",
+   "eyebrow": "Gaps · data and pipeline",
+   "title": "What the graph cannot see or do today",
+   "columns": [
+    {
+     "heading": "Coverage",
+     "items": [
+      {
+       "status": "missing",
+       "text": "Production data: every live value is UAT; a production read replica does not exist"
+      },
+      {
+       "status": "partial",
+       "text": "Front-end parser is regex based: 31.6% of API call sites unresolved; a Babel-based extractor is the fix"
+      },
+      {
+       "status": "missing",
+       "text": "Redux/state layer, component tree, background jobs, config-key reads and model→table edges have no extractor"
+      },
+      {
+       "status": "partial",
+       "text": "Backend production branch is still the bootstrap import; FEATURE, PERSON and OWNS layers are not re-derived by the indexer"
+      },
+      {
+       "status": "missing",
+       "text": "Runtime 'A actually calls B' evidence cannot be refreshed for new commits"
+      },
+      {
+       "status": "missing",
+       "text": "Supplier app (web-bidding) has no screen layer"
+      }
+     ]
+    },
+    {
+     "heading": "Documents and freshness",
+     "items": [
+      {
+       "status": "missing",
+       "text": "Zero PRDs attached to commits; the PR-body ingestion job and the PR template are not adopted"
+      },
+      {
+       "status": "partial",
+       "text": "16 uploaded guides; the journeys people ask about need about fifty; none of them link to code by identifier yet"
+      },
+      {
+       "status": "missing",
+       "text": "Notion, Drive and Confluence connectors; no upload button in the UI"
+      },
+      {
+       "status": "missing",
+       "text": "Indexing on merge is not live; the VM graph lags until someone runs a command"
+      },
+      {
+       "status": "missing",
+       "text": "No alert when the mirror or the graph goes stale"
+      }
+     ]
+    }
+   ],
+   "size": 12
+  },
+  {
+   "type": "status",
+   "eyebrow": "Gaps · product, quality and operations",
+   "title": "What users will notice, and what a reviewer should",
+   "columns": [
+    {
+     "heading": "Product",
+     "items": [
+      {
+       "status": "missing",
+       "text": "HubSpot: no ticket lookup by number, no write-back; triage is paste-only"
+      },
+      {
+       "status": "partial",
+       "text": "Template preview is our drawing with the platform's measurements, not the dashboard's own renderer"
+      },
+      {
+       "status": "partial",
+       "text": "Workflow diagrams are model-authored then validated; no deterministic diagram from graph data alone"
+      },
+      {
+       "status": "missing",
+       "text": "No Slack or Teams entry point; no shared chat links; no admin UI for accounts and roles"
+      },
+      {
+       "status": "missing",
+       "text": "No self-service password reset; Google SSO removed until a hostname with TLS exists"
+      }
+     ]
+    },
+    {
+     "heading": "Quality and operations",
+     "items": [
+      {
+       "status": "missing",
+       "text": "Triage accuracy unmeasured; feedback votes are stored but nothing reads them yet"
+      },
+      {
+       "status": "partial",
+       "text": "Eval covers 8 engineer questions and honesty only; no CS, template, config or follow-up cases; no CI gate"
+      },
+      {
+       "status": "partial",
+       "text": "Answer quality depends on FAST_SMALLER through a gateway that stalls; the fallback covers stalls, not quality"
+      },
+      {
+       "status": "exists",
+       "text": "Fixed this week: the model's SQL role could read chats and sessions; revoked in migration 019"
+      },
+      {
+       "status": "partial",
+       "text": "Saved-chat replay is not re-filtered when a role changes; the final summary event is unfiltered"
+      }
+     ]
+    }
+   ],
+   "size": 12,
+   "note": "Everything on these two slides was found by auditing the repository and database, not by recollection."
+  },
+  {
+   "type": "table",
+   "eyebrow": "Risks",
+   "title": "Risks and how each is held",
+   "col_widths": [
+    3.6,
+    4.4,
+    4.1
+   ],
+   "rows": [
+    [
+     "Risk",
+     "Why it matters",
+     "Mitigation in place / proposed"
+    ],
+    [
+     "Answers about UAT presented as production truth",
+     "CS tickets are about production",
+     "Every live value is stamped UAT; proposed: production read replica, one config change"
+    ],
+    [
+     "Model quality and gateway stalls",
+     "Prose quality and 12 s stall penalties",
+     "Hedged fallback, breaker, retries; proposed: stronger primary model"
+    ],
+    [
+     "Graph lags the code on the VM",
+     "Answers drift after merges",
+     "Push-model indexing exists, needs first exercise; until then a runbook"
+    ],
+    [
+     "Regex parsers miss code",
+     "31.6% of FE calls unresolved",
+     "Babel extractor; version bump re-parses everything"
+    ],
+    [
+     "Feature ranking in triage misfires",
+     "Wrong owner or feature on a card",
+     "Verdict gating, 👍/👎 feedback, calibration on 20 real tickets before trust"
+    ],
+    [
+     "Security of the model's DB access",
+     "Planner-written SQL runs as a DB role",
+     "SELECT-only role; sensitive tables revoked (019); 5 s statement timeout"
+    ],
+    [
+     "Single VM, single person knows it",
+     "Availability and bus factor",
+     "Runbooks in docs/; proposed: backups schedule and a second maintainer"
+    ]
+   ],
+   "size": 10.5,
+   "row_h": 0.52
+  },
+  {
+   "type": "table",
+   "eyebrow": "Roadmap",
+   "title": "Next six weeks, in the order that unblocks the most",
+   "col_widths": [
+    1.3,
+    4.6,
+    3.3,
+    2.9
+   ],
+   "rows": [
+    [
+     "Week",
+     "Work",
+     "Why now",
+     "Needs"
+    ],
+    [
+     "1",
+     "Exercise push indexing on merge; eval set for CS, templates, configs, follow-ups; tests + eval in CI",
+     "Stops drift and makes every later change measurable",
+     "VM access, 1 engineer"
+    ],
+    [
+     "2",
+     "Production read replica or mirror; staleness alerts; SELECT-only UAT role",
+     "CS questions are about production",
+     "DBA, one config change"
+    ],
+    [
+     "2–3",
+     "Twenty anonymised tickets → triage calibration; HubSpot read-only lookup by number",
+     "Turns triage from plausible into measured",
+     "HubSpot admin token, CS time"
+    ],
+    [
+     "3–4",
+     "Babel front-end extractor; Redux/state extractor; supplier-app screens",
+     "Lifts 31.6% unresolved calls and 22.5% screen coverage",
+     "1 engineer"
+    ],
+    [
+     "4–5",
+     "Five journey guides written by CS/Product; PR template adopted in the three repos; PR-body PRD ingestion",
+     "Documents are the fastest accuracy lever",
+     "Product + CS authors"
+    ],
+    [
+     "5–6",
+     "Slack entry point; admin UI for roles; password reset; Google SSO once a hostname exists",
+     "Adoption and hygiene",
+     "DNS + TLS"
+    ]
+   ],
+   "size": 10.5,
+   "row_h": 0.58
+  },
+  {
+   "type": "bullets",
+   "eyebrow": "Asks",
+   "title": "What we need from the panel",
+   "columns": [
+    {
+     "heading": "Decisions",
+     "items": [
+      [
+       "Production access, read-only.",
+       "A read replica or a SELECT-only role, so CS answers stop being UAT answers"
+      ],
+      [
+       "Model.",
+       "Permission to use a stronger primary model through Slingring; the fallback already exists"
+      ],
+      [
+       "Hostname and TLS",
+       "for the VM, which unlocks Google sign-in and a shareable URL"
+      ],
+      [
+       "Scope call:",
+       "should the supplier app and the flexi modules be in the graph in this quarter"
+      ]
+     ]
+    },
+    {
+     "heading": "People and data",
+     "items": [
+      [
+       "Twenty closed tickets,",
+       "anonymised, with their real outcome, for triage calibration"
+      ],
+      [
+       "A HubSpot admin",
+       "to create a read-only private app"
+      ],
+      [
+       "Five journey guides",
+       "from CS and Product, one page each, in screen language"
+      ],
+      [
+       "A second maintainer",
+       "on the VM and the indexing runbooks"
+      ]
+     ]
+    }
+   ],
+   "size": 13
+  },
+  {
+   "type": "quote",
+   "quote": "“Every answer names the file, the guide or the live row that proves it, and says so when it cannot tell.”",
+   "attribution": "The promise the service enforces. Thank you. Questions?"
+  },
+  {
+   "type": "table",
+   "eyebrow": "Appendix A",
+   "title": "Data model in one table",
+   "col_widths": [
+    2.6,
+    5.4,
+    4.1
+   ],
+   "rows": [
+    [
+     "Table",
+     "Holds",
+     "Key property"
+    ],
+    [
+     "ckg.repos / commits / commit_files",
+     "which blob sat at which path in which commit",
+     "content-addressed; renames are cache hits"
+    ],
+    [
+     "ckg.blobs / blob_facts / blob_text",
+     "one file's bytes, its parsed facts per extractor version, its source text",
+     "parsed once per content, stored once, ever"
+    ],
+    [
+     "ckg.entities / edges",
+     "facts and relationships, per commit",
+     "append-only; unique on (repo, commit, kind, fqn)"
+    ],
+    [
+     "ckg.ref_history",
+     "which commit each branch pointed at, when",
+     "the latest row is 'current' for that branch"
+    ],
+    [
+     "ckg.embeddings / doc_chunks",
+     "vectors for entity cards and document passages",
+     "text-hash keyed; identical cards copy vectors"
+    ],
+    [
+     "live.* (12 tables) + config_index, search_index",
+     "read-only mirror of UAT and its semantic indexes",
+     "allow-listed columns; refreshed every 60 s"
+    ],
+    [
+     "ckg.users / sessions / chats / chat_turns / ask_log / triage_feedback",
+     "accounts, sessions, saved chats, audit, feedback",
+     "service-only; revoked from the model's role"
+    ]
+   ],
+   "size": 10.5,
+   "row_h": 0.5
+  },
+  {
+   "type": "bullets",
+   "eyebrow": "Appendix B",
+   "title": "Commands a maintainer actually runs",
+   "columns": [
+    {
+     "heading": "Graph",
+     "items": [
+      [
+       "npm run index",
+       "-- --repo-dir ../procol-backend --ref origin/main-uat-test --tenant shared --env uat"
+      ],
+      [
+       "npm run embed",
+       "(all current branches; identical cards copy their vectors)"
+      ],
+      [
+       "npm run sync:live:once",
+       "(one mirror pass; the VM runs it as a service every 60 s)"
+      ],
+      [
+       "npm run migrate",
+       "(001–019, idempotent)"
+      ]
+     ]
+    },
+    {
+     "heading": "People and quality",
+     "items": [
+      [
+       "npm run users -- add <email> <role> \"Name\"",
+       "prints a generated password once"
+      ],
+      [
+       "npm run users -- role <email> qa",
+       "applies on the next request"
+      ],
+      [
+       "npm test",
+       "67 tests · npm run eval · node src/eval-triage.mjs --role cs"
+      ],
+      [
+       "node src/ingest-doc.mjs --file guide.md --tags approvals --owner \"CS\"",
+       "adds a business document"
+      ]
+     ]
+    }
+   ],
+   "size": 12,
+   "note": "Full runbooks: docs/VM_SETUP.md, VM_UPDATE.md, CKG_INDEXING.md, AUTH.md, CHATS.md, TRIAGE.md, DOCS_INGEST.md."
+  }
+ ]
+}

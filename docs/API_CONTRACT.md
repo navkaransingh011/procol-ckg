@@ -48,7 +48,7 @@ Response: `text/event-stream`, one JSON object per `data:` line. Use
 | `evidence` | `{ id, repo, path, line, commit, ref, extractor }` | popover content for a chip |
 | `unresolved` | `{ fqn, path, line, reason }` | **a normal outcome, not an error** |
 | `truncated` | `{ reason, at_depth }` | "trace bounded at depth 6" |
-| `done` | `{ claim_count, evidence_count, ms }` | stop the spinner |
+| `done` | `{ claim_count, evidence_count, ms, confidence, side_facts? }` | stop the spinner; `confidence` is `high` / `medium` / `low`, computed from retrieval (see README "Calibrated confidence") |
 | `error` | `{ code, message }` | error state |
 
 ### Rules the FE must honour

@@ -30,7 +30,7 @@ export default function Login({ cfg, onSignIn, error, busy }) {
       <section className="login-card" ref={card} aria-labelledby="login-title">
         <span className="brand-mark brand-mark--lg" aria-hidden="true"><i /><i /><i /></span>
         <p className="eyebrow">Procol · Code Graph</p>
-        <h1 id="login-title">Ask the codebase <em>what it does</em>.</h1>
+        <h1 id="login-title">Ask the knowledge base <em>how Procol works</em>.</h1>
         <p className="login-sub">Sign in with your Procol account. Your role decides how much of the code an answer shows.</p>
 
         <form className="devform" onSubmit={submit}>

@@ -90,16 +90,16 @@ node src/index-commit.mjs --repo-dir ../procol-client-dashboard --ref origin/mai
 **CI needs a hosted Postgres.** GitHub runners cannot reach a laptop. Provision it on
 whichever cloud your infra team already operates before wiring `.github/workflows/ckg-index.yml`.
 
-## Known gaps (v0.1)
+## Known gaps (current)
 
-- `fe-http@0.1-regex` mis-folds template literals containing a nested ternary. Real
-  example found on `main`: `` `/companies/${id}/vendor_members${x ? `?a=${b}` : ""}` ``.
-  This is precisely why the Babel version is required — it is a parsing problem, not a
-  pattern problem.
-- Bare-identifier call sites (~224 on `main`) are stored as `resolution='AMBIGUOUS'`,
-  `pathTemplate=null`. Deliberate: they need scope-aware variable tracing.
-- Backend extractors not yet written. `procol-backend` indexes zero entities today.
-- Multi-line `promisifiedXHR(` calls are missed by the regex (~75 of 785).
+- `fe-http@0.1-regex` is still the regex extractor: 31.6% of dashboard call sites resolve to no endpoint (bare identifiers
+  such as `url`), and template literals with nested ternaries mis-fold. The Babel-based `fe-http@1.0` remains the fix.
+- Screens reach only the call sites inside their own view folder (22.5%); the Redux/api.js layer has no extractor yet.
+- `procol-backend@main` is still the bootstrap-imported commit; every other backend branch is fully extractor-generated.
+- Runtime `CALLS` evidence exists only from the import; the tracer harness that would refresh it on merge lives outside this repo.
+- Push-model indexing (`src/index-service.mjs`, `deploy/ckg-push-tree.yml`) is built but has not indexed anything yet; the
+  VM is still indexed by hand (docs/VM_UPDATE.md).
+- FEATURE / PERSON / OWNS layers come from the import and are not re-derived by the indexer.
 
 ## Semantic anchoring (pilot)
 
@@ -265,6 +265,18 @@ schema `live` of our own Postgres, so answers can join **what the docs intend**,
   datasources and environment switches (27.8k rows, refreshed by the poller, content-addressed). With the config
   catalogue index this makes the live layer semantic like code and documents: all three layers are searched on every
   question, and their best matches reach the planner as candidates (CANDIDATE NODES / CONFIGS / LIVE ROWS).
+- **Side facts are gated.** Switches and platform rows found by meaning reach the planner and the writer only when the
+  question is about platform state (configuration words, a named customer, a template / approval flow / datasource) or
+  the planner asks for live data -- and then only the top two that stand clear of the rest (`clearTop` in
+  `src/service/confidence.mjs`: the runner-up joins within 0.05, a flat field is noise). A journey question no longer
+  picks up "77 approval flows for create_trade" because a row sounded similar.
+- **Calibrated confidence.** `assessConfidence` grades every answer from HOW its facts were found -- an exact name hit,
+  a screen chain read in the order asked, a strong match by meaning clear of the runner-up, agreement between
+  independent sources (code, documents, screens, live rows), and whether a state question was answered by data. The
+  level and one reason go to the writer as `facts.confidence` (the prompt asserts on high, names the one weaker link on
+  medium, states the missing piece on low), appear as a status line, and ride on the `done` event. The old
+  "The closest thing I found is X, which may not be exactly what you asked about" opener is gone: a fuzzy name match
+  is a retrieval detail, not a verdict, and a journey answer is about the journey.
 - **A PRD can ship with a commit.** `ingest-doc.mjs --commit <sha> --repo <name> --files ...` (or `--repo-dir`) stores a
   document AT that commit with `DESCRIBES` edges to every node in the files it changed; in-repo `docs/prd/**` with YAML
   front matter does the same automatically on index. See docs/DOCS_INGEST.md and docs/PR_TEMPLATE_SNIPPET.md.

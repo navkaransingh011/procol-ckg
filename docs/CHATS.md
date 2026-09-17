@@ -9,7 +9,7 @@ Inside a chat the agent understands follow-ups ("and for RIL?", "show me that te
 | Table | Holds | Size |
 |---|---|---|
 | `ckg.chats` | id, owner email, title, timestamps | tiny |
-| `ckg.chat_turns` | question, how it was understood, refs, role, answer text, entities, **gzipped events**, model, ms | ~3-7 KB per turn compressed (23 KB avg raw, 8x gzip) |
+| `ckg.chat_turns` | question, how it was understood, refs, role, answer text, entities, **gzipped events**, model, ms | ~3-8 KB per turn compressed (measured 4.4x overall; 3x on plain answers, 9x on code-heavy ones) |
 
 Sizing: 50 people asking 10 questions a day is roughly 50 MB a month compressed. Retention keeps it bounded:
 after `CKG_CHAT_RETENTION_DAYS` (default 180) the replay events of a turn are nulled and only the question and

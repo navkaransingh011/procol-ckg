@@ -5,7 +5,8 @@ import React from "react";
  * answer's numbered section titles ("2. Evidence path"), bullets, numbered items, `code`, **bold**,
  * and the "Read from …" refs footer. No HTML passthrough, no dependency.
  */
-const SECTION = /^(\d)\.\s+([A-Z][^.`]{1,48})$/;
+// Only the technical answer's section titles become headings; a numbered STEP ("1. Click Create PO") stays a list item.
+const SECTION = /^(\d)\.\s+((?:Answer|Evidence path|Data|Known defects|Not covered|What the graph|Confidence)[^.`]{0,44})$/;
 
 function inline(text, key, step) {
   const parts = [];
