@@ -126,6 +126,13 @@ const server = createServer(async (req, res) => {
     if (!user) return json(res, 401, { error: "sign in first" });
     try {
       const b = await readJson(req, 8 * 1024);
+      if (b.kind === "answer") {   // thumbs on an ordinary answer: the evaluation set grows from real use (sql/021)
+        if (typeof b.helpful !== "boolean") return json(res, 400, { error: "helpful must be true or false" });
+        await q(`insert into ckg.answer_feedback (email, chat_id, seq, helpful, question, confidence, note) values ($1,$2,$3,$4,$5,$6,$7)`,
+                [user.email, b.chat_id || null, Number.isInteger(b.seq) ? b.seq : null, b.helpful, String(b.question || "").slice(0, 2000) || null,
+                 String(b.confidence || "").slice(0, 10) || null, String(b.note || "").slice(0, 1000) || null]);
+        return json(res, 200, { ok: true });
+      }
       if (typeof b.correct !== "boolean") return json(res, 400, { error: "correct must be true or false" });
       await q(`insert into ckg.triage_feedback (email, chat_id, seq, verdict, correct, note) values ($1,$2,$3,$4,$5,$6)`,
               [user.email, b.chat_id || null, Number.isInteger(b.seq) ? b.seq : null, String(b.verdict || "").slice(0, 40) || null, b.correct, String(b.note || "").slice(0, 1000) || null]);
@@ -231,6 +238,10 @@ server.listen(PORT, HOST, () => {
   console.log(`  cors      ${ORIGIN}`);
   // Warm the embedding model now, so the first question's document search is ~12 ms instead of ~170 ms.
   embed(["warm up"]).then(() => console.log("  embed     warm")).catch((e) => console.log(`  embed     not available (${e.message}); document search will be skipped`));
+  // Warm the cross-encoder too: loading it costs 1-2 s (16 s on the very first run, when the weights download).
+  import("./rerank.mjs").then((r) => r.rerank("warm up", [{ t: "warm up" }], (x) => x.t).then((out) =>
+    console.log(`  rerank    ${out[0]?.rerank != null ? "warm (" + r.rerankModelId() + ")" : "off or unavailable; vector order stands"}`))).catch(() => {});
+  console.log(`  writer    ${process.env.LLM_WRITER_MODEL ? process.env.LLM_WRITER_MODEL + " (LLM_WRITER_MODEL)" : p.model + " (same as planner)"}`);
 });
 
 for (const sig of ["SIGINT", "SIGTERM"]) {

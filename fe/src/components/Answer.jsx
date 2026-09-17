@@ -7,8 +7,16 @@ import TemplatePreview from "./TemplatePreview.jsx";
 import Workflow from "./Workflow.jsx";
 import TriageCard from "./TriageCard.jsx";
 
-export default function Answer({ turn, asking, onFeedback }) {
+// Where the technical answer's second section starts ("2. Evidence path", "## 2. Evidence path", "2. **Evidence path**").
+const TECH_SPLIT = /^\s*(?:#{1,6}\s*)?\*{0,2}2\.\s*\*{0,2}\s*(?:Evidence|Under the hood)/m;
+const splitTechnical = (text) => {
+  const m = TECH_SPLIT.exec(text || "");
+  return m ? { head: text.slice(0, m.index).trimEnd(), tail: text.slice(m.index) } : { head: text, tail: "" };
+};
+
+export default function Answer({ turn, asking, onFeedback, onRate }) {
   const [copied, setCopied] = useState(false);
+  const [rated, setRated] = useState(null);   // "up" | "down" once the person has answered "Helpful?"
   const simple = turn.intent === "simple";
   const hasTrace = turn.claims.length > 0;
   const flow = turn.flow || null;
@@ -48,8 +56,30 @@ export default function Answer({ turn, asking, onFeedback }) {
       {turn.text && (
         <div className={flow ? "answer-split" : undefined}>
           <div className="prose-wrap" ref={proseRef}>
-            <Markdown text={turn.text} step={stepCtl} />
+            {(() => {
+              // A technical answer is two layers: section 1 in plain words, then evidence, data, defects, gaps and
+              // confidence. The first is the page; the rest folds under "Technical detail" until someone asks for it.
+              const { head, tail } = simple ? { head: turn.text, tail: "" } : splitTechnical(turn.text);
+              return (
+                <>
+                  <Markdown text={head} step={stepCtl} />
+                  {tail && (
+                    <details className="details details--technical">
+                      <summary>Technical detail<span className="muted"> · evidence path, data, defects, gaps, confidence</span></summary>
+                      <div className="prose-tech"><Markdown text={tail} step={stepCtl} /></div>
+                    </details>
+                  )}
+                </>
+              );
+            })()}
             <button type="button" className="ghost ghost--sm copy" onClick={copy}>{copied ? "copied" : "copy"}</button>
+            {!asking && !turn.triage && (
+              <div className="rate" role="group" aria-label="Was this answer helpful?">
+                <span className="rate-q">{rated === "up" ? "Thanks, noted." : rated === "down" ? "Noted. This question goes to the review list." : "Helpful?"}</span>
+                {!rated && <button type="button" className="ghost ghost--sm rate-btn" onClick={() => { setRated("up"); onRate?.(turn, true); }}>Yes</button>}
+                {!rated && <button type="button" className="ghost ghost--sm rate-btn" onClick={() => { setRated("down"); onRate?.(turn, false); }}>No</button>}
+              </div>
+            )}
           </div>
           {flow && (
             <aside className="answer-side" aria-label="Workflow">
@@ -73,12 +103,17 @@ export default function Answer({ turn, asking, onFeedback }) {
       {/* Complete result sets from the live platform mirror: exact rows, the prose only summarises them. */}
       {(turn.tables || []).map((t, i) => <DataTable key={`${t.source}-${i}`} table={t} />)}
 
-      {simple && hasTrace ? (
-        <details className="details" open={!turn.text}>
-          <summary>Show the evidence path</summary>
+      {/* The evidence path stays folded for every role: the answer is the page, the path is there for whoever asks.
+          It opens by itself only when no prose came back, so the reader is never left with nothing. */}
+      {hasTrace && (
+        <details className="details details--evidence" open={!turn.text && !asking ? true : undefined}>
+          <summary>
+            {asking ? <><span className="live-dot" aria-hidden="true" /> Gathering evidence</> : "Show the evidence path"}
+            <span className="muted"> · {turn.claims.length} fact{turn.claims.length === 1 ? "" : "s"}{asking ? " so far" : ""}</span>
+          </summary>
           {trace}
         </details>
-      ) : trace}
+      )}
 
       {/* Not an error: the trail stopping here is a correct, useful outcome. */}
       {turn.unresolved.length > 0 && (
@@ -101,6 +136,7 @@ export default function Answer({ turn, asking, onFeedback }) {
 
       {turn.summary && (
         <div className="receipt">
+          {turn.summary.confidence && <span className={`conf conf--${turn.summary.confidence}`}>confidence {turn.summary.confidence}</span>}
           <span>{turn.summary.claim_count} hops</span>
           <span>{turn.summary.evidence_count} sources</span>
           {turn.summary.unresolved_count ? <span>{turn.summary.unresolved_count} unresolved</span> : null}

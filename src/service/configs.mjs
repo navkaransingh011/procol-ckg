@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { q } from "../db.mjs";
 
 const TENANTS = JSON.parse(readFileSync(new URL("../../config/tenants.json", import.meta.url), "utf8"));
-const STOP = new Set(["procol", "uat", "prod", "po", "pr", "rfq", "rfi", "nfa", "event", "events", "template", "templates", "vendor", "vendors", "buyer", "supplier", "the", "and", "for", "with", "which", "what", "how", "when", "does", "this", "that", "are", "is", "on", "off", "default", "config", "configs", "configuration", "configurations", "master", "custom", "company", "companies", "client", "customer", "user", "users", "team", "teams", "approval", "approvals", "workflow", "purchase", "order", "orders", "request", "requests", "auction", "auctions", "material", "materials", "service", "services", "show", "list", "all", "any", "reliance industries jio"]);
+const STOP = new Set(["procol", "uat", "prod", "po", "pr", "rfq", "rfi", "nfa", "event", "events", "template", "templates", "vendor", "vendors", "buyer", "supplier", "the", "and", "for", "with", "which", "what", "how", "when", "does", "this", "that", "are", "is", "on", "off", "default", "config", "configs", "configuration", "configurations", "master", "custom", "company", "companies", "client", "customer", "user", "users", "team", "teams", "approval", "approvals", "workflow", "purchase", "order", "orders", "request", "requests", "auction", "auctions", "material", "materials", "service", "services", "show", "list", "all", "any", "tell", "explain", "describe", "give", "walk", "please", "help", "find", "check", "compare", "summarize", "summarise", "reliance industries jio"]);
 
 /** Companies a name refers to. Tenant words expand to their patterns; otherwise a substring match on the platform name. */
 export async function resolveCompanies({ name, active_only = true, limit = 12 }) {
@@ -29,7 +29,9 @@ export async function companyMentions(question) {
   const words = String(question || "").match(/\b[A-Z][A-Za-z&.'-]{2,}(?:\s+[A-Z][A-Za-z&.'-]{2,}){0,3}\b/g) || [];
   const lower = [...new Set(words.map(w => w.trim()))].filter(w => !STOP.has(w.toLowerCase()) && !STOP.has(w.split(" ")[0].toLowerCase()));
   for (const w of lower.slice(0, 5)) {
-    const cs = await resolveCompanies({ name: w, limit: 6 });
+    // a capitalised word must START a word in the company name: "Tell" must not hit "Supply Chain INTELLigence"
+    const startsWord = new RegExp("\\b" + w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const cs = (await resolveCompanies({ name: w, limit: 6 })).filter(c => startsWord.test(c.name || ""));
     if (cs.length && cs.length <= 6) for (const c of cs) found.set(c.id, { ...c, mention: w });
   }
   // tenant words in lower case too ("reliance", "jindal")

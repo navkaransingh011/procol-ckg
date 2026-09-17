@@ -310,3 +310,29 @@ file:line evidence. The UI has an Auto / Simple / Code toggle that forces it.
 | `guided` | Service picks one anchor by name, traces, model narrates. Sub-second. Fails on plain-English questions. | fast path only |
 | `plan` | Model plans (with candidates found by meaning), service runs lookups/lists/SQL/families in parallel, reads source when needed, model writes. Bounded facts payload with one retry. | deep answers |
 | `sql` | Model writes read-only SQL itself. Expert mode. | engineers |
+
+## Measuring answers, reranking, and the writer model
+
+Three things decide whether an answer is right, and they are measured in this order so each proves the next.
+
+- **Evaluation set.** `eval/answers.json` holds 42 questions (17 real ones from `ckg.ask_log`, 25 written for coverage) with
+  expectations a person can check: names that must / must not appear, the confidence level, a numbered step list, a table,
+  template, diagram or triage card, file paths for engineers and none for CS. `npm run eval:answers -- --judge --label <name>`
+  runs the real pipeline per role, applies the role's event filter exactly as the server does, grades the result, and adds a
+  model judge for what exact checks cannot see (answers first, hedging, repetition, padding). Reports land in
+  `eval/out/answers/<label>/` (REPORT.md, results.json, one file per question with its trace); `--compare <results.json>`
+  prints per-question deltas. Entries marked `verified: false` still need a human to confirm the expectation is the right
+  answer, not just the current one. Every answer in the UI has "Helpful? Yes / No"; thumbs-down rows in `ckg.answer_feedback`
+  are the queue of new eval cases.
+- **Hybrid retrieval and reranking.** Vector search alone cannot separate relevant from related here (0.70 vs 0.69). Each search
+  now fuses meaning with the question's words (Postgres full-text over the indexed text, `sql/020_fulltext.sql`) and, for
+  configuration switches, the exact key the person typed. Document passages then pass through a local cross-encoder
+  (`Xenova/ms-marco-MiniLM-L-6-v2` via Transformers.js, `src/service/rerank.mjs`): on the awarding-to-PO question the three
+  passages that answer it score 0.99 / 0.96 / 0.87 and the rest fall to 0.4 and below; an off-topic question gets none.
+  `CKG_RERANK=0` turns it off, `CKG_RERANK_MODEL` swaps it; if the model cannot load the vector order stands. The confidence
+  signal uses the reranker's probability (0.5 line) when present.
+- **Writer model.** `LLM_WRITER_MODEL` points the final-answer call at a different model than the planner's, with
+  `LLM_WRITER_REASONING_EFFORT` for its thinking budget; hedging and failover work as before with the other configured model
+  as the hedge. Unset, nothing changes. The gateway offers `FAST_SMALLER` and `HACK26_GPT_5_6_LUNA`; the eval set decides.
+
+Results so far are recorded in `docs/WORK_IN_PROGRESS.md`.

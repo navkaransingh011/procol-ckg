@@ -106,3 +106,14 @@ built, styled and reviewed against it before any model or key exists.
 | `CKG_AUTH_MODE` | `dev` | `dev` accepts any token and says so in the stream. Use `procol` anywhere reachable |
 | `CKG_PROCOL_VERIFY_URL` | — | required when `CKG_AUTH_MODE=procol` |
 | `LLM_AZURE_API_VERSION` | — | set it to switch to Azure's `api-key` header + `?api-version=` |
+
+## `POST /api/feedback`
+
+Signed-in only. Two shapes, both stored with the caller's email:
+
+| Body | Stored in | Meaning |
+|---|---|---|
+| `{ chat_id?, seq?, verdict?, correct: boolean, note? }` | `ckg.triage_feedback` | the triage card was right / wrong |
+| `{ kind: "answer", chat_id?, seq?, helpful: boolean, question?, confidence?, note? }` | `ckg.answer_feedback` | "Helpful? Yes / No" under an answer; thumbs-down rows feed `eval/answers.json` |
+
+Neither table is readable by the model's SQL role.

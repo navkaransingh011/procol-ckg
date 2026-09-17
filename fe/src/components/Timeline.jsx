@@ -15,8 +15,17 @@ export default function Timeline({ steps, asking, startedAt, ms }) {
   if (!steps?.length) return null;
 
   const elapsed = asking ? (now - startedAt) / 1000 : (ms || 0) / 1000;
-  if (!asking && !open) {
-    return (
+  // Folded by default in both states. While the answer is being worked out, one live line says what is happening
+  // right now; afterwards, one line says how long it took. The full list of steps is a click away either way.
+  if (!open) {
+    return asking ? (
+      <button type="button" className="timeline-summary timeline-summary--live" onClick={() => setOpen(true)} aria-live="polite">
+        <span className="live-dot" aria-hidden="true" />
+        <span className="step-text">{steps[steps.length - 1]}</span>
+        <span className="step-time">{elapsed.toFixed(0)} s</span>
+        <span className="muted"> · show steps</span>
+      </button>
+    ) : (
       <button type="button" className="timeline-summary" onClick={() => setOpen(true)}>
         <span className="tick" aria-hidden="true">✓</span>
         {steps.length} step{steps.length === 1 ? "" : "s"} · {elapsed.toFixed(1)} s
@@ -36,7 +45,7 @@ export default function Timeline({ steps, asking, startedAt, ms }) {
           </li>
         );
       })}
-      {!asking && <li className="step step--end"><button type="button" className="ghost ghost--sm" onClick={() => setOpen(false)}>hide</button></li>}
+      <li className="step step--end"><button type="button" className="ghost ghost--sm" onClick={() => setOpen(false)}>hide</button></li>
     </ol>
   );
 }

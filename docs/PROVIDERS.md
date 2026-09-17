@@ -86,3 +86,17 @@ DONE:  {"claim_count":1,"evidence_count":1,"tool_calls":4,"mode":"guided","ms":8
 ```
 
 The graph is the product. The model is the narrator, and it is replaceable.
+
+## The writer may use a different model
+
+`LLM_WRITER_MODEL=<gateway model id>` sends only the final-answer call (the writer) to that model; planning, follow-up rewriting,
+the flow block and triage extraction stay on `LLM_MODEL`. `LLM_WRITER_REASONING_EFFORT` caps its thinking (defaults to the
+fallback's setting when the writer is the fallback model, else `LLM_REASONING_EFFORT`). Hedging and failover are unchanged: the
+hedge is whichever configured model the writer is not. The startup banner prints the writer in use. Measure a change with
+`npm run eval:answers -- --judge --label writer-<model> --compare eval/out/answers/<previous>/results.json`.
+
+## Local reranker
+
+`src/service/rerank.mjs` loads `Xenova/ms-marco-MiniLM-L-6-v2` (22M parameters, int8) through @huggingface/transformers into
+the same cache as the embedder (`EMBED_CACHE_DIR`). First run downloads ~23 MB; later loads take 1-2 s and the server warms it
+at start. `CKG_RERANK=0` disables it; `CKG_RERANK_MODEL=Xenova/bge-reranker-base` is a stronger, ~10x slower alternative.

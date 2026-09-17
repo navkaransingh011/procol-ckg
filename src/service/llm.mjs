@@ -23,6 +23,9 @@ const cfg = () => {
            FALLBACK: process.env.LLM_FALLBACK_MODEL || "" };
 };
 export const provider = () => { const c = cfg(); return { base: c.BASE, model: c.MODEL, mock: c.BASE === "mock", fallback: c.FALLBACK || null }; };
+/** The model that writes the final answer. LLM_WRITER_MODEL lets it differ from the planner's (a stronger, slower model
+ *  for the one call where judgment matters); unset, it is the primary model and nothing changes. */
+export const writerModel = () => process.env.LLM_WRITER_MODEL || cfg().MODEL;
 
 const TIMEOUT_MS = () => Number(process.env.LLM_TIMEOUT_MS    || 90000);
 const FIRST_BYTE = () => Number(process.env.LLM_FIRST_BYTE_MS || 12000);
@@ -153,23 +156,29 @@ async function withRetries(fn) {
 }
 
 /** Final answer (or any round), streamed token by token when the gateway streams. */
-export async function* chatStream({ messages, tools, temperature = 0.1, max_tokens = 2000, reasoning_effort = null }) {
-  const { BASE, MODEL, FALLBACK } = cfg();
+export async function* chatStream({ messages, tools, temperature = 0.1, max_tokens = 2000, reasoning_effort = null, model: pick = null }) {
+  const { BASE, MODEL: PRIMARY, FALLBACK } = cfg();
   if (BASE === "mock") return;
+  // A caller may choose the model for THIS call (the writer passes LLM_WRITER_MODEL). Hedging and failover stay the
+  // same; the hedge is whichever configured model the chosen one is not.
+  const MODEL = pick || PRIMARY;
+  const HEDGE = FALLBACK && FALLBACK !== MODEL ? FALLBACK : PRIMARY !== MODEL ? PRIMARY : MODEL;
   // LLM_REASONING_EFFORT (none | minimal | low | medium | high) caps hidden thinking on reasoning models so text
-  // arrives sooner and the budget is not spent before any text appears. The fallback model gets its own setting.
+  // arrives sooner and the budget is not spent before any text appears. The fallback model gets its own setting; a
+  // chosen writer model gets LLM_WRITER_REASONING_EFFORT when set.
   const primaryEffort = reasoning_effort || process.env.LLM_REASONING_EFFORT;
-  const bodyFor = (model) => {
-    const isFallback = FALLBACK && model === FALLBACK && model !== MODEL;
-    const eff = isFallback ? FALLBACK_EFFORT() : primaryEffort;
-    return { model, messages, temperature, max_tokens: isFallback ? FALLBACK_BUDGET(max_tokens) : max_tokens, stream: true,
+  const bodyFor = (m) => {
+    const isFallbackModel = FALLBACK && m === FALLBACK && m !== PRIMARY;   // LUNA-class: reasons at length, needs the bigger budget
+    const eff = pick && m === MODEL ? (reasoning_effort || process.env.LLM_WRITER_REASONING_EFFORT || (isFallbackModel ? FALLBACK_EFFORT() : primaryEffort))
+              : isFallbackModel ? FALLBACK_EFFORT() : primaryEffort;
+    return { model: m, messages, temperature, max_tokens: isFallbackModel ? FALLBACK_BUDGET(max_tokens) : max_tokens, stream: true,
              ...(eff && eff !== "none" ? { reasoning_effort: eff } : {}),
              ...(tools?.length ? { tools, tool_choice: "auto" } : {}) };
   };
-  // attempt 0: primary, hedged by the fallback. later attempts: fallback first, primary as the hedge.
+  // attempt 0: the model, hedged by the other one. later attempts: the hedge first, the model as its hedge.
   const { it, first, overall, model } = await withRetries((i) =>
-    i === 0 || !FALLBACK ? raceFirstByte(bodyFor(MODEL), bodyFor(FALLBACK || MODEL)) : raceFirstByte(bodyFor(FALLBACK), bodyFor(MODEL)));
-  chatStream.lastModel = model;                       // agent reports when a fallback model answered
+    i === 0 || HEDGE === MODEL ? raceFirstByte(bodyFor(MODEL), bodyFor(HEDGE)) : raceFirstByte(bodyFor(HEDGE), bodyFor(MODEL)));
+  chatStream.lastModel = model;                       // agent reports when a different model than intended answered
   try {
     yield first;
     for (;;) { const d = await it.next(); if (d === null) return; yield d; }
@@ -177,9 +186,9 @@ export async function* chatStream({ messages, tools, temperature = 0.1, max_toke
 }
 
 /** One round returned whole -- over the same streaming, hedged, failover path. */
-export async function chat({ messages, tools, temperature = 0.1, max_tokens = 2000, reasoning_effort = null }) {
+export async function chat({ messages, tools, temperature = 0.1, max_tokens = 2000, reasoning_effort = null, model = null }) {
   if (cfg().BASE === "mock") throw new Error("mock provider: use mockRound() instead");
   let content = "";
-  for await (const d of chatStream({ messages, tools, temperature, max_tokens, reasoning_effort })) content += d;
+  for await (const d of chatStream({ messages, tools, temperature, max_tokens, reasoning_effort, model })) content += d;
   return { content };
 }

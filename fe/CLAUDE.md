@@ -51,7 +51,11 @@ procol-ckg/
     src/components/Background.jsx the graph constellation canvas, now at .55 opacity under the icon field
     src/components/TemplatePreview.jsx  a template's layout (sheet / form / fields) drawn from mirror data, styled like the platform sheet
     src/components/Composer.jsx   the centered input pill: autosize, Enter=send, Shift+Enter=newline, stop button, progress sweep
-    src/components/Answer.jsx     status line, prose, TracePath, "Where the trail stops", truncated note, error, receipt
+    src/components/Answer.jsx     one-line live timeline (expandable), prose + "Helpful? Yes / No", workflow aside, templates, tables,
+                                  a technical answer is split at "2. Evidence path": section 1 (plain words) is the page, the rest folds
+                                  under "Technical detail"; the receipt shows the confidence level as a coloured chip,
+                                  the evidence path FOLDED under "Show the evidence path · N facts" for every role (opens itself only
+                                  when no prose came back), "Where the trail stops", truncated note, error, receipt
     src/components/TracePath.jsx  the execution path drawn as coloured nodes joined by labelled connectors
     src/styles.css       design tokens (light + dark), every component style. Type: Geist (UI), Instrument Serif
                          (headline only, italic accent word), Geist Mono (code); loaded from Google Fonts in index.html

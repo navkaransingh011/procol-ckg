@@ -14,7 +14,7 @@ import { findEntity, traceFrom, getEvidence, endpointCoverage, resolveScope, lis
 import { q } from "../db.mjs";
 import { createHash } from "node:crypto";
 import { runSql, SCHEMA_DOC } from "../sqltool.mjs";
-import { chat, chatStream, provider } from "./llm.mjs";
+import { chat, chatStream, provider, writerModel } from "./llm.mjs";
 
 const MAX_ROUNDS = 6;
 
@@ -86,7 +86,7 @@ const norm = (s) => String(s || "").toLowerCase().replace(/[^\p{L}\p{N}#./:_-]+/
  * Cache in front of the real run. Key = question (normalised) + style + the exact commits in scope, so a
  * re-index misses on its own. Replays the stored event stream in ~ms with one leading status line.
  */
-const CACHE_VERSION = 4;   // 4: calibrated confidence, gated side facts, no approximate-match disclaimer (3: platform-styled template previews)
+const CACHE_VERSION = 5;   // 5: technical answers lead in plain words, technical sections folded in the UI (4: calibrated confidence, gated side facts)
 export async function ask({ question: asked, refs = ["main"], emit, style = "auto", fresh = false, policy = null, history = null }) {
   const p0 = provider();
   // Inside a chat, a follow-up is rewritten into a standalone question from what earlier turns made explicit.
@@ -255,7 +255,7 @@ async function attachDocuments({ question, hint = "", refs, emit, seen = new Set
            edge: "MENTIONS", depth: 0, evidence_ids: [`d${p.doc_id}`], confidence: Number(p.score.toFixed(2)) });
   }
   return passages.map(p => ({ title: p.title, path: p.path, source: p.source || "repo", kind: p.subkind, tags: p.tags,
-                              heading: p.heading_path, score: Number(p.score.toFixed(2)), text: p.text.slice(0, 1800) }));
+                              heading: p.heading_path, score: Number(p.score.toFixed(2)), ...(p.rerank != null ? { rerank: p.rerank } : {}), text: p.text.slice(0, 1800) }));
 }
 
 /** "Api::V1::ActivityLogsController#index" -> "api v1 activity logs controller index": product words for the doc search. */
@@ -466,7 +466,7 @@ async function guidedRun({ question, refs, emit, t0, p, intent = "code", policy 
     documents: documents.slice(0, 3).map(d => ({ ...d, text: d.text.slice(0, 900) })),
   };
   {
-    const c = assessConfidence({ lookups: [{ match: found.weak ? "approximate" : "exact", matched_on: token, anchor: { kind: seed.kind, name: seed.name || seed.fqn } }],
+    const c = assessConfidence({ question, lookups: [{ q: token, match: found.weak ? "approximate" : "exact", matched_on: token, anchor: { kind: seed.kind, name: seed.name || seed.fqn } }],
                                  documents, unresolved: (fwd.unresolved ?? []).length, truncated: !!fwd.truncated });
     facts.confidence = { level: c.level, reason: c.reason, ...(c.missing ? { missing: c.missing } : {}) };
   }
@@ -501,7 +501,7 @@ FACTS
 ${JSON.stringify(policy ? redactFacts(facts, policy) : facts, null, 1).slice(0, 12000)}`;
 
   emit({ type: "status", text: `confidence ${facts.confidence.level}: ${facts.confidence.reason}` });
-  emit({ type: "status", text: `writing the ${intent === "simple" ? "plain-English" : ""} answer (${p.model})`.replace("  ", " ") });
+  emit({ type: "status", text: `writing the ${intent === "simple" ? "plain-English" : ""} answer (${writerModel()})`.replace("  ", " ") });
   const guidedSystem = intent === "simple"
     ? "You explain software to a non-engineer in plain, warm English. Use ONLY the JSON facts. Lead with what the user does and what happens. Prefer product words over code words. 3-5 sentences, then an optional short 'In the code' line naming real files from the facts. Invent nothing; if the facts fall short, say so."
     : SYSTEM;
@@ -740,9 +740,14 @@ WHAT THE GRAPH CANNOT TELL YOU -- be explicit about this
   evidence that a call does not happen.
 
 ANSWER FORMAT (use these headings, keep it tight)
-1. Answer -- 2-3 sentences that directly answer the question, stated as fact when confidence is high.
-2. Evidence path -- numbered hops. Each hop: kind, name, path:line, and [RUNTIME] / [EXACT] / [HEURISTIC]
-   where it matters. Frontend -> endpoint -> route -> handler -> methods -> data.
+1. Answer -- IN PLAIN WORDS, readable by anyone at Procol: 2-3 sentences that directly answer the question, stated as
+   fact when confidence is high. Name the subject (the template, document, screen, switch, table or method) by its
+   exact name in the first sentence -- "It" is not an answer. For a process, flow or journey question, follow with the
+   steps ONCE as a numbered list -- the screen, the click, what happens next -- taken from screen_journey when present,
+   in product language. No file paths, class or method names, endpoints or citation markers in this section: a
+   product manager must be able to read section 1 alone and understand the flow. The code lives in section 2.
+2. Evidence path -- the technical layer: numbered hops. Each hop: kind, name, path:line, and [RUNTIME] / [EXACT] /
+   [HEURISTIC] where it matters. Frontend -> endpoint -> route -> handler -> methods -> data.
 3. Data & side effects -- tables, columns, external services touched, if any appear in the facts.
    Only DB_TABLE nodes are tables (snake_case names from db/schema.rb). A Ruby class such as Workflow or
    Approval is a MODEL -- label it "model", never "table".
@@ -779,9 +784,9 @@ HARD RULES
   hides the gaps -- the one thing this system must never do.
 
 OVERVIEW QUESTIONS ("how does X work", "what is X", "explain X")
-- Section 1 becomes a plain-English explanation for a non-engineer, 4-8 sentences: what it lets a user do,
-  the screens or frontend files involved, the backend endpoints and handlers they call, and the data behind it.
-  Lead with "overviews" when present, then ground each statement in a named file or endpoint from the facts.
+- Section 1 is the plain-English explanation for a non-engineer: what it lets a user do, the screens involved, and
+  what the system does after each step -- then the numbered steps for a flow. Lead with "overviews" and
+  "screen_journey" when present. The files, endpoints and handlers behind each step go in section 2, not here.
 - Do NOT narrate retrieval mechanics. Never write "the anchor is", "the unresolved list is empty",
   "truncated is false", "no hubs were skipped", "the match was exact". Mention a gap only when it changes
   the answer, and only in section 5.`;
@@ -792,6 +797,8 @@ about this product except those facts.
 
 SHAPE OF THE ANSWER -- always in this order, each part once
 1. The answer: two or three plain sentences that answer the question directly. No preamble, no "here is the flow".
+   Name the thing you are describing (the template, document, screen or setting) by its exact name in the first
+   sentence -- "It asks for..." is not an answer; "The Vendor Onboarding - Non-Food Supplies template asks for..." is.
 2. The steps, ONLY if the question is about a process or journey: one numbered list, one step per line, in the
    order the person experiences them -- the screen, the click, what happens next. Take them from "screen_journey"
    when present (its hops are real clicks read from the dashboard code), else from "documents" or "overviews".
@@ -998,8 +1005,8 @@ async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYST
     const sys = system + (facts.conversation ? "\n" + CONVERSATION_RULE : "") + (flow ? "\n" + FLOW_RULES : "");
     const messages = [{ role: "system", content: sys }, { role: "user", content: `QUESTION: ${question}\n\nFACTS:\n${json}` }];
     let t = "";
-    for await (const d of chatStream({ messages, max_tokens: flow ? 3200 : 2400, temperature: 0 })) t += d;
-    if (!t) t = (await chat({ messages, max_tokens: flow ? 3200 : 2400, temperature: 0 })).content || "";
+    for await (const d of chatStream({ messages, max_tokens: flow ? 3200 : 2400, temperature: 0, model: writerModel() })) t += d;
+    if (!t) t = (await chat({ messages, max_tokens: flow ? 3200 : 2400, temperature: 0, model: writerModel() })).content || "";
     return t;
   };
   try { text = await run(shrink(structuredClone(facts), budget)); }
@@ -1027,8 +1034,8 @@ async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYST
   if (split.flow) emit({ type: "flow", ...split.flow, steps_total: split.flow.steps.length });
   else if (flow && split.dropped) emit({ type: "status", text: `no diagram: ${split.dropped}` });
   const clean = sanitizePaths(split.text, known);
-  if (chatStream.lastModel && chatStream.lastModel !== provider().model)
-    emit({ type: "status", text: `primary model stalled; answered by fallback model ${chatStream.lastModel}` });
+  if (chatStream.lastModel && chatStream.lastModel !== writerModel())
+    emit({ type: "status", text: `writer model ${writerModel()} stalled; answered by ${chatStream.lastModel}` });
   emit({ type: "token", text: clean.text });
   if (clean.removed) emit({ type: "status", text: `removed ${clean.removed} file path${clean.removed > 1 ? "s" : ""} the model guessed but was not given` });
   return clean.text;
@@ -1366,28 +1373,42 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
   const JOURNEY_RE = /\b(journey|walk me through|step[- ]by[- ]step|end[- ]to[- ]end|how (do|does|can) (i|a|an|the|we|buyer|supplier|user)|where (do|can) (i|we)|from .{3,60} (to|till|until) )/i;
   let screenJourneyFacts = null;
   const screenViews = [];
-  for (const r of results) if (r.anchor?.kind === "UI_ROUTE" && r.anchor?.id) { const v = await screenView({ id: r.anchor.id, refs }).catch(() => null); if (v) screenViews.push(v); }
-  if (JOURNEY_RE.test(question)) {
+  const addScreen = async (id) => { if (!id || screenViews.some(v => v.id === Number(id))) return; const v = await screenView({ id: Number(id), refs }).catch(() => null); if (v) screenViews.push(v); };
+  for (const r of results) if (r.anchor?.kind === "UI_ROUTE" && r.anchor?.id) await addScreen(r.anchor.id);
+  // Screens the question NAMES get their view (actions, where they lead, the APIs they call) whether or not it is a
+  // journey question -- "what can I do on the Awarding screen", "which APIs does PR Details call". Name lookups split
+  // a multi-word screen name into tokens and miss it; this is the direct route.
+  const named = await screensNamedIn({ question, refs }).catch(() => []);   // in the order the question names them
+  for (const n of named.slice(0, 3)) await addScreen(n.id);
+  if (named.length) emit({ type: "status", text: `screens named in the question: ${named.slice(0, 3).map(n => n.name || n.screen).join(" · ")}` });
+  // A journey is asked for explicitly (journey, walk me through, step by step, from X to Y, which screens) or by the
+  // generic "how do I / how does a buyer" form -- the generic form counts only when the question names a screen, or
+  // "how does the mobile app handle offline bids" grows a chain out of screens that merely sound similar.
+  const journeyAsk = /\b(journey|walk me through|step[- ]by[- ]step|end[- ]to[- ]end|where (do|can) (i|we)|which screens?|from .{3,60} (to|till|until) )/i.test(question)
+    || (JOURNEY_RE.test(question) && named.length > 0);
+  if (journeyAsk) {
     try {
-      const hits = (await semanticAnchor({ question, k: 6, refs, kinds: ["UI_ROUTE"] })).matches.filter(m => Number(m.score) >= 0.5);
-      const named = await screensNamedIn({ question, refs });                 // screens the question names, in the order it names them
-      let start = named[0]?.id || null, end = named.length > 1 ? named[named.length - 1].id : null;
-      const span = /\bfrom\s+(.{3,60}?)\s+(?:to|till|until|up to)\s+(?:the\s+|a\s+|an\s+)?(.{2,60}?)(?=[,.:;]|\s+(?:through|via|by|and|which|where|how)\b|$)/i.exec(question);
-      if (span) {
-        const a = await screensNamedIn({ question: span[1], refs }), b = await screensNamedIn({ question: span[2], refs });
-        if (a[0]) start = a[0].id; if (b[0]) end = b[0].id;
-      }
-      const ids = [...new Set([...named.map(n => n.id), ...screenViews.map(v => v.id), ...hits.map(h => Number(h.id))])];
-      screenJourneyFacts = await screenJourney({ candidateIds: named.map(n => n.id).length >= 2 ? named.map(n => n.id) : ids, refs, from: start, to: end });
-      for (const n of named.slice(0, 4)) if (!screenViews.some(v => v.id === n.id)) { const v = await screenView({ id: n.id, refs }).catch(() => null); if (v) screenViews.push(v); }
-      if (screenJourneyFacts) emit({ type: "status", text: `screen journey: ${screenJourneyFacts.screens.map(s => s.screen).join(" → ")}` });
-      for (const h of hits.slice(0, 3)) if (!screenViews.some(v => v.id === Number(h.id))) { const v = await screenView({ id: Number(h.id), refs }).catch(() => null); if (v) screenViews.push(v); }
+      // a chain needs a foothold: a named screen, or a screen that clearly matches the question's meaning (0.6, not 0.5 --
+      // "how does the mobile app handle offline bids" must not grow a seven-hop chain out of loosely similar screens)
+      const hits = (await semanticAnchor({ question, k: 6, refs, kinds: ["UI_ROUTE"] })).matches.filter(m => Number(m.score) >= (named.length ? 0.5 : 0.6));
+      if (named.length || hits.length) {
+        let start = named[0]?.id || null, end = named.length > 1 ? named[named.length - 1].id : null;
+        const span = /\bfrom\s+(.{3,60}?)\s+(?:to|till|until|up to)\s+(?:the\s+|a\s+|an\s+)?(.{2,60}?)(?=[,.:;]|\s+(?:through|via|by|and|which|where|how)\b|$)/i.exec(question);
+        if (span) {
+          const a = await screensNamedIn({ question: span[1], refs }), b = await screensNamedIn({ question: span[2], refs });
+          if (a[0]) start = a[0].id; if (b[0]) end = b[0].id;
+        }
+        const ids = [...new Set([...named.map(n => n.id), ...screenViews.map(v => v.id), ...hits.map(h => Number(h.id))])];
+        screenJourneyFacts = await screenJourney({ candidateIds: named.length >= 2 ? named.map(n => n.id) : ids, refs, from: start, to: end });
+        if (screenJourneyFacts) { screenJourneyFacts.named_in_question = named.length; emit({ type: "status", text: `screen journey: ${screenJourneyFacts.screens.map(s => s.screen).join(" → ")}` }); }
+        for (const h of hits.slice(0, 3)) await addScreen(h.id);
+      } else emit({ type: "status", text: "no screen named or clearly matched by the question: no journey drawn" });
     } catch (e) { emit({ type: "status", text: `screen journey unavailable: ${String(e.message).slice(0, 60)}` }); }
   }
 
   // CONFIDENCE -- from how the facts were found, never from the model's tone; the writer's wording follows it.
-  const journeyQuestion = JOURNEY_RE.test(question);
-  const confidence = assessConfidence({ lookups: results, screen_journey: screenJourneyFacts, screens: screenViews, documents, live, source,
+  const journeyQuestion = journeyAsk;
+  const confidence = assessConfidence({ question, lookups: results, screen_journey: screenJourneyFacts, namedScreens: named.length, screens: screenViews, documents, live, source,
                                         effective_configuration: effectiveConfigViews, companies_with: companiesWithViews, lists, planned_sql: sqlResults, sem,
                                         planAskedLive, journeyQuestion, unresolved: results.reduce((a, r) => a + (r.unresolved?.length || 0), 0), truncated: results.some(r => r.truncated) });
   const facts = { question, refs,
@@ -1422,7 +1443,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
   const retrieveMs = Date.now() - tRetrieve;
   emitContextPaths(JSON.stringify(facts), emit);
   emit({ type: "status", text: `confidence ${confidence.level}: ${confidence.reason}` });
-  emit({ type: "status", text: `writing the ${intent === "simple" ? "plain-English" : "technical"} answer (${p.model})` });
+  emit({ type: "status", text: `writing the ${intent === "simple" ? "plain-English" : "technical"} answer (${writerModel()})` });
   const tAnswer = Date.now();
   const drawFlow = wantsFlow(question) && (results.some(r => r.match !== "none") || documents.length > 0 || live.length > 0);
   if (drawFlow) emit({ type: "status", text: "drawing the workflow beside the answer" });

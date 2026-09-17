@@ -37,42 +37,61 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 /** One level, one reason, and (below high) the single thing that would raise it. */
-export function assessConfidence({ lookups = [], screen_journey = null, screens = [], documents = [], live = [], source = [],
+export function assessConfidence({ question = "", lookups = [], screen_journey = null, screens = [], documents = [], live = [], source = [],
                                    effective_configuration = [], companies_with = [], lists = [], planned_sql = [], sem = [],
-                                   planAskedLive = false, journeyQuestion = false, unresolved = 0, truncated = false } = {}) {
-  const exactL = lookups.filter(l => l?.match === "exact");
+                                   planAskedLive = false, journeyQuestion = false, unresolved = 0, truncated = false, namedScreens = null } = {}) {
+  // An "exact" match is only as good as where its name came from. A name the PERSON wrote ("/activity_logs",
+  // "Bid#validate") is a real anchor. A name the planner copied from the candidates found by meaning is exact by
+  // construction -- "what colour is the moon" yields six exact hits on *_color methods -- so it counts only when the
+  // match by meaning behind it is strong.
+  const qLower = String(question || "").toLowerCase();
+  const named = (l) => !qLower || (l?.q && qLower.includes(String(l.q).toLowerCase()));
+  const semTop = num(sem[0]?.score), semMargin = sem.length ? semTop - num(sem[1]?.score) : 0;
+  const semStrong = semTop >= 0.72 && semMargin >= 0.04;
+  const exactAll = lookups.filter(l => l?.match === "exact");
+  const exactL = exactAll.filter(l => named(l) || semStrong);          // exact hits that mean something
+  const plannedOnly = exactAll.length > 0 && exactL.length === 0;       // the planner found code, the question did not name it
   const approxL = lookups.filter(l => l?.match === "approximate");
   const noneL = lookups.filter(l => !l || l.match === "none");
-  const journey = !!(screen_journey?.screens?.length >= 2);
+  // a chain counts only when the question named a screen or the chain follows the order asked; a chain grown from
+  // loosely similar screens is noise (named_in_question is set by the agent; older callers omit it)
+  const journey = !!(screen_journey?.screens?.length >= 2) && (!!screen_journey.follows_question_order || (screen_journey.named_in_question ?? 1) >= 1);
   const journeyOrdered = journey && !!screen_journey.follows_question_order;
   // bge-small compresses scores: measured on this index, passages that answer the question score 0.70-0.73,
   // loosely related ones 0.65-0.69, unrelated ones about 0.50-0.56. 0.70 is the line between the first two
   // (the scores arrive rounded to two decimals, so 0.695 counts and 0.689 does not).
-  const strongDocs = documents.filter(d => num(d?.score) >= 0.70);
+  // When the cross-encoder ran, its probability is the better judge: relevant passages score 0.85-0.99, ones that
+  // merely share nouns 0.0-0.4 (measured on the same questions). 0.5 is the line.
+  const strongDocs = documents.filter(d => (d?.rerank != null ? num(d.rerank) >= 0.5 : num(d?.score) >= 0.70));
   const liveRows = live.filter(l => l && !l.error && num(l.total) > 0);
   const stateAnswered = (planAskedLive && liveRows.length > 0) || effective_configuration.length > 0 || companies_with.length > 0;
-  const completeList = lists.some(l => l && l.complete && num(l.total) > 0) || planned_sql.some(r => r && !r.error && num(r.row_count) > 0);
-  const semTop = num(sem[0]?.score), semMargin = sem.length ? semTop - num(sem[1]?.score) : 0;
-  const semStrong = semTop >= 0.72 && semMargin >= 0.04;
-
+  // a complete set answers a question only when the question asked for a set ("which", "all", "how many"); the planner
+  // also lists things for context, and that list must not make an off-topic question "high"
+  const setQuestion = /\b(all|every|which|how many|list|count|names? of)\b/i.test(qLower);
+  const completeList = setQuestion && (lists.some(l => l && l.complete && num(l.total) > 0) || planned_sql.some(r => r && !r.error && num(r.row_count) > 0));
   // independent sources that agree on the subject
   const sources = [];
   if (exactL.length || source.length || completeList) sources.push("code");
   if (strongDocs.length) sources.push("documents");
-  if (journey || screens.length) sources.push("screens");
+  // screens confirm an answer when the question named them or a chain was read; screens found only by meaning do not
+  // ("how does the mobile app handle offline bids" pulls Home and Purchase Request at 0.66 -- that confirms nothing)
+  const screensNamed = namedScreens == null ? screens.length : namedScreens;
+  if (journey || (screens.length && screensNamed > 0)) sources.push("screens");
   if (stateAnswered) sources.push("live data");
 
   const strong = exactL.length > 0 || (journeyQuestion && journeyOrdered) || semStrong || stateAnswered || completeList;
-  const weak = !strong && !journey && !strongDocs.length && semTop < 0.6 && !approxL.length;
+  const weak = !strong && !journey && !strongDocs.length && !stateAnswered && semTop < 0.62 && !approxL.length;
   // one source is enough when it is authoritative for the question: platform rows for a state question, a complete
   // set for a "which/how many" question, an exact code match whose trace was followed to the end, or a screen
   // chain read from the dashboard code in the order the journey question asked
-  const cleanTrace = exactL.length > 0 && unresolved === 0 && !truncated;
+  // a name the person wrote, or a code node matched clearly by meaning whose SOURCE was read, followed to the end
+  const cleanTrace = (exactAll.some(named) || (semStrong && exactAll.length > 0 && source.length > 0)) && unresolved === 0 && !truncated;
   const authoritative = stateAnswered || completeList || cleanTrace || (journeyQuestion && journeyOrdered);
   let level;
   if (strong && (sources.length >= 2 || authoritative)) level = "high";
   else if (weak || noneL.length === lookups.length && !journey && !strongDocs.length && !stateAnswered) level = "low";
   else if (!exactL.length && approxL.length && sources.length <= 1 && !journey) level = "low";
+  else if (plannedOnly && !strongDocs.length && !journey && !stateAnswered && !source.length) level = "low";
   else level = "medium";
   if (level === "high" && (truncated || unresolved > 2) && !journeyOrdered && !stateAnswered) level = "medium";
 
@@ -85,13 +104,14 @@ export function assessConfidence({ lookups = [], screen_journey = null, screens 
   else if (completeList) primary = "a complete set from the index answers it";
   else if (journey) primary = "a screen chain was found, though not in the order asked";
   else if (semStrong) primary = `a strong match by meaning (${semTop.toFixed(2)})`;
+  else if (plannedOnly) primary = `code matched only by meaning (${semTop.toFixed(2)}); the question names nothing in the code`;
   else if (approxL.length) primary = `only a fuzzy name match on "${approxL[0].matched_on || "the question"}"`;
   else if (strongDocs.length) primary = "only documents cover it";
   else primary = "nothing matched by name and the matches by meaning are weak";
   const agreeing = [];
   if (strongDocs.length && primary !== "only documents cover it") agreeing.push(plural(strongDocs.length, "document passage"));
   if (source.length) agreeing.push("the source that was read");
-  if (screens.length && !primary.includes("screen")) agreeing.push(plural(screens.length, "screen"));
+  if (screens.length && screensNamed > 0 && !primary.includes("screen")) agreeing.push(plural(screens.length, "screen"));
   if (stateAnswered && !primary.includes("live")) agreeing.push("live platform rows");
   const list = (xs) => xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
   const reason = agreeing.length ? `${primary}, confirmed by ${list(agreeing)}` : level === "high" ? primary : `${primary}, and nothing else confirms it`;
@@ -102,6 +122,7 @@ export function assessConfidence({ lookups = [], screen_journey = null, screens 
     if (journeyQuestion && !journey) missing = "the screens involved were not matched, so the steps are not read from the dashboard code";
     else if (journeyQuestion && !journeyOrdered) missing = "the screens were matched, but not in the order the question asked";
     else if (exactL.length && (unresolved > 0 || truncated)) missing = "part of the code path could not be followed";
+    else if (plannedOnly && !strongDocs.length && !stateAnswered) missing = "the question names no screen, feature or code object, so the code was matched by meaning only";
     else if (!strongDocs.length && !stateAnswered) missing = "no document covers this";
     else if (!exactL.length && !source.length && !stateAnswered) missing = "the code was matched only by a fuzzy name, not read";
     else if (unresolved > 0 || truncated) missing = "part of the code path could not be followed";

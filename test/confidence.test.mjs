@@ -36,13 +36,28 @@ test("a fuzzy name match with nothing else behind it is low, and says what is mi
   assert.equal(c.missing, "no document covers this");
 });
 
-test("an exact code match with a clean trace is high on its own; an unresolved trace is medium", () => {
-  const clean = assessConfidence({ lookups: [{ match: "exact", anchor: { kind: "SYMBOL", name: "Bid#validate" } }] });
+test("an exact match on a name the person wrote, with a clean trace, is high on its own; an unresolved trace is medium", () => {
+  const question = "what does Bid#validate check?";
+  const clean = assessConfidence({ question, lookups: [{ q: "Bid#validate", match: "exact", anchor: { kind: "SYMBOL", name: "Bid#validate" } }] });
   assert.equal(clean.level, "high");
   assert.equal(clean.reason, "an exact match in the code");
-  const broken = assessConfidence({ lookups: [{ match: "exact", anchor: { kind: "SYMBOL", name: "Bid#validate" } }], unresolved: 3 });
+  const broken = assessConfidence({ question, lookups: [{ q: "Bid#validate", match: "exact", anchor: { kind: "SYMBOL", name: "Bid#validate" } }], unresolved: 3 });
   assert.equal(broken.level, "medium");
   assert.equal(broken.missing, "part of the code path could not be followed");
+});
+
+test("exact hits on names the PLANNER copied from weak matches by meaning are not anchors: the moon question is low", () => {
+  const c = assessConfidence({ question: "What colour is the moon?",
+                               lookups: ["BidTradeProduct#traffic_light_color", "NewBidSerializer#traffic_signal_color"].map(q => ({ q, match: "exact", anchor: { kind: "SYMBOL", name: q } })),
+                               documents: [{ score: 0.56 }, { score: 0.52 }], sem: [{ score: 0.58 }, { score: 0.57 }] });
+  assert.equal(c.level, "low");
+  assert.match(c.reason, /matched only by meaning/);
+  assert.match(c.missing, /names no screen, feature or code object/);
+  // the same planner-derived hits become real anchors when the match by meaning is strong and clear
+  const strong = assessConfidence({ question: "how is the traffic light colour of a bid computed?",
+                                    lookups: [{ q: "BidTradeProduct#traffic_light_color", match: "exact", anchor: { kind: "SYMBOL", name: "BidTradeProduct#traffic_light_color" } }],
+                                    sem: [{ score: 0.81 }, { score: 0.66 }], source: [{ path: "app/models/bid_trade_product.rb" }] });
+  assert.equal(strong.level, "high");
 });
 
 test("a state question answered by live rows the planner asked for is high; live rows nobody asked for do not count", () => {

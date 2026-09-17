@@ -183,9 +183,14 @@ export function useAgent() {
     const seq = turns.indexOf(turn) + 1;
     sendFeedback({ chat_id: chatId, seq, verdict: turn.triage?.verdict || null, correct }).catch(() => {});
   }, [chatId, turns]);
+  // thumbs on an ordinary answer; the question and its confidence level travel along so a thumbs-down can become an eval case
+  const rateAnswer = useCallback((turn, helpful) => {
+    const seq = turns.indexOf(turn) + 1;
+    sendFeedback({ kind: "answer", chat_id: chatId, seq, helpful, question: turn.question, confidence: turn.summary?.confidence || null }).catch(() => {});
+  }, [chatId, turns]);
 
   const active = turns.find((t) => t.id === activeId) || turns[turns.length - 1] || null;
-  return { me, authCfg, authError, authBusy, signIn, signOut, feedback,
+  return { me, authCfg, authError, authBusy, signIn, signOut, feedback, rateAnswer,
            health, refs, selectedRef, setSelectedRef,
            chats, chatId, openChat, newChat, removeChat, renameChat, loadingChat,
            turns, active, select: setActiveId, asking, ask, stop, reset: newChat };

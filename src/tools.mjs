@@ -468,6 +468,27 @@ export async function semanticAnchor({ question, k = 10, refs = ["main"], kinds 
 }
 
 
+// ---- hybrid retrieval helpers ----
+// Vector search alone is blunt on this index (relevant 0.70 vs related 0.69). Each search below runs two or three
+// ranked lists -- by meaning, by the question's WORDS (Postgres full-text over the indexed text; sql/020_fulltext.sql
+// adds the tsvector columns, and without them the words list is simply empty), and for switches the exact KEY the
+// person typed -- and fuses them by reciprocal rank. Documents then go through the cross-encoder (service/rerank.mjs).
+const LEX_STOP = new Set(("what which where when does do did the and for with from this that these those into onto have has had are is was were be been " +
+  "being can could should would will shall how why who whom whose there their they them then than also only just about above after again against all any " +
+  "both each few more most other some such over under very out off up down not nor but own same too tell show give explain please want need like know").split(" "));
+export function lexicalQuery(question) {
+  const s = String(question || "");
+  const keys = [...new Set((s.match(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/gi) || []).map(k => k.toLowerCase()))];
+  const words = [...new Set((s.toLowerCase().match(/[a-z][a-z0-9]{3,}/g) || []).filter(w => !LEX_STOP.has(w)))];
+  return { keys, words, tsquery: words.length ? words.join(" | ") : null };
+}
+export const DOC_RERANK_FLOOR = 0.2;   // cross-encoder probability below which a passage only shares nouns with the question
+const fuseRanks = (lists, key, k = 60) => {
+  const s = new Map(), it = new Map();
+  for (const l of lists) l.forEach((x, i) => { const id = key(x); s.set(id, (s.get(id) || 0) + 1 / (k + i + 1)); if (!it.has(id)) it.set(id, x); });
+  return [...s.entries()].sort((a, b) => b[1] - a[1]).map(([id, f]) => ({ ...it.get(id), fused: Number(f.toFixed(5)) }));
+};
+
 /**
  * search_docs -- semantic search over documentation passages (in-repo docs at the indexed commits, plus
  * uploaded business documents, which are commit-less). Returns passages with the document, heading and text.
@@ -478,8 +499,8 @@ export async function searchDocs({ question, k = 6, refs = ["main"], repo = null
   const model = embedModelId();
   const [v] = await embed([question], { isQuery: true });
   const { commits } = await resolveScope(refs);
-  const rows = await q(
-    `select d.id as doc_id, d.name as title, d.path, d.attrs->>'source' as source, d.attrs->>'subkind' as subkind, d.attrs->'tags' as tags,
+  const lex = lexicalQuery(question);
+  const select = `select d.id as doc_id, d.name as title, d.path, d.attrs->>'source' as source, d.attrs->>'subkind' as subkind, d.attrs->'tags' as tags,
             rp.name as repo, c.ordinal, c.heading_path, c.text, c.words,
             (1 - (c.embedding <=> $1::vector))::float as score
        from ckg.doc_chunks c
@@ -487,18 +508,29 @@ export async function searchDocs({ question, k = 6, refs = ["main"], repo = null
        left join ckg.repos rp on rp.id = d.repo_id
       where c.model = $2 and c.embedding is not null
         and (d.commit_sha is null or encode(d.commit_sha,'hex') = any($3::text[]))
-        and ($4::text is null or rp.name = $4)
-      order by c.embedding <=> $1::vector
-      limit $5`, [toPgVector(v), model, commits, repo, k * 3]);
-  // one passage per (doc, heading): the best-scoring; then top-k above the floor
-  const seen = new Set(); const out = [];
-  for (const r of rows) {
-    const key = `${r.doc_id}:${r.heading_path}`;
-    if (seen.has(key) || Number(r.score) < min_score) continue;
-    seen.add(key); out.push({ ...r, score: Number(r.score) });
-    if (out.length >= k) break;
+        and ($4::text is null or rp.name = $4)`;
+  // two ranked lists -- by meaning, and by the question's words over heading + text -- fused by reciprocal rank
+  const [byMeaning, byWords] = await Promise.all([
+    q(`${select} order by c.embedding <=> $1::vector limit $5`, [toPgVector(v), model, commits, repo, k * 3]),
+    lex.tsquery ? q(`${select} and c.tsv @@ to_tsquery('english', $6) order by ts_rank_cd(c.tsv, to_tsquery('english', $6)) desc limit $5`,
+                    [toPgVector(v), model, commits, repo, k * 2, lex.tsquery]).catch(() => []) : [],
+  ]);
+  const inMeaning = new Set(byMeaning.map(r => `${r.doc_id}:${r.ordinal}`));
+  // one passage per (doc, heading); the vector floor applies to what meaning found, a words-only hit stays for the reranker to judge
+  const seen = new Set(); const cand = [];
+  for (const r of fuseRanks([byMeaning, byWords], r => `${r.doc_id}:${r.ordinal}`)) {
+    const key = `${r.doc_id}:${r.heading_path}`, id = `${r.doc_id}:${r.ordinal}`;
+    if (seen.has(key)) continue;
+    if (inMeaning.has(id) && Number(r.score) < min_score) continue;
+    seen.add(key); cand.push({ ...r, score: Number(r.score), via: inMeaning.has(id) ? "meaning" : "words" });
+    if (cand.length >= k * 2) break;
   }
-  return { model, passages: out, count: out.length };
+  // the cross-encoder decides the final order and cuts what merely shares nouns with the question
+  const { rerank, rerankModelId } = await import("./service/rerank.mjs");
+  const ranked = await rerank(question, cand, p => `${p.title} — ${p.heading_path}. ${p.text}`, { top: k * 2 });
+  const reranked = ranked.some(p => p.rerank != null);
+  const out = (reranked ? ranked.filter(p => p.rerank >= DOC_RERANK_FLOOR) : ranked.sort((a, b) => b.score - a.score)).slice(0, k);
+  return { model, reranker: reranked ? rerankModelId() : null, passages: out, count: out.length };
 }
 
 // ---------------------------------------------------------------------------------
@@ -568,17 +600,28 @@ export async function searchConfigs({ question, k = 6, min_score = 0.4 }) {
   const { embed, embedModelId, toPgVector } = await import("./service/embed.mjs");
   const model = embedModelId();
   const [v] = await embed([question], { isQuery: true });
-  const rows = await q(
-    `select ci.config_key, (1 - (ci.embedding <=> $1::vector))::float as score,
-            m.name, m.description, m.defaults, m.status, m.item_type,
+  const lex = lexicalQuery(question);
+  const detail = `m.name, m.description, m.defaults, m.status, m.item_type,
             (select count(*) from live.custom_configurations cc where cc.config_key = ci.config_key) as overrides,
             (select count(*) from live.custom_configurations cc where cc.config_key = ci.config_key and cc.status = 1) as overrides_active,
             (select count(distinct cc.company_id) from live.custom_configurations cc where cc.config_key = ci.config_key and cc.status = 1) as companies_active
        from live.config_index ci
-       join lateral (select name, description, defaults, status, item_type from live.master_configurations m where m.config_key = ci.config_key order by company_id nulls first limit 1) m on true
-      where ci.model = $2
-      order by ci.embedding <=> $1::vector
-      limit $3`, [toPgVector(v), model, k]).catch(() => []);
+       join lateral (select name, description, defaults, status, item_type from live.master_configurations m where m.config_key = ci.config_key order by company_id nulls first limit 1) m on true`;
+  // three ranked lists: the exact key the person typed, the question's words over key + name + description, and meaning
+  const [byKey, byWords, byMeaning] = await Promise.all([
+    lex.keys.length ? q(`select ci.config_key, 1.0::float as score, ${detail} where ci.config_key = any($1::text[])`, [lex.keys]).catch(() => []) : [],
+    lex.tsquery ? q(`select ci.config_key, (1 - (ci.embedding <=> $1::vector))::float as score, ${detail} where ci.model = $2 and ci.tsv @@ to_tsquery('english', $3)
+                     order by ts_rank_cd(ci.tsv, to_tsquery('english', $3)) desc limit $4`, [toPgVector(v), model, lex.tsquery, k * 2]).catch(() => []) : [],
+    q(`select ci.config_key, (1 - (ci.embedding <=> $1::vector))::float as score, ${detail} where ci.model = $2 order by ci.embedding <=> $1::vector limit $3`, [toPgVector(v), model, k * 2]).catch(() => []),
+  ]);
+  const via = new Map();
+  for (const [name, list] of [["key", byKey], ["words", byWords], ["meaning", byMeaning]]) for (const r of list) if (!via.has(r.config_key)) via.set(r.config_key, name);
+  const wordsTop = new Set(byWords.slice(0, 2).map(r => r.config_key));
+  const rows = fuseRanks([byKey, byWords, byMeaning], r => r.config_key)
+    .sort((a, b) => (via.get(b.config_key) === "key") - (via.get(a.config_key) === "key"))   // a typed key always leads
+    .slice(0, k)
+    // a typed key is certain (1.0); the two best word matches clear the caller's floor; the rest keep their cosine
+    .map(r => ({ ...r, via: via.get(r.config_key), score: via.get(r.config_key) === "key" ? 1 : wordsTop.has(r.config_key) ? Math.max(Number(r.score), 0.62) : Number(r.score) }));
   const [st] = await q(`select last_run from live.sync_state where table_name='master_configurations'`).catch(() => [{}]);
   return { model, as_of: st?.last_run ?? null, configs: rows.filter(r => Number(r.score) >= min_score).map(r => ({ ...r, score: Number(Number(r.score).toFixed(2)), overrides: Number(r.overrides), overrides_active: Number(r.overrides_active), companies_active: Number(r.companies_active) })) };
 }
@@ -589,10 +632,18 @@ export async function searchLive({ question, k = 6, min_score = 0.5 }) {
   const { embed, embedModelId, toPgVector } = await import("./service/embed.mjs");
   const model = embedModelId();
   const [v] = await embed([question], { isQuery: true });
-  const rows = await q(
-    `select si.kind, si.ref_id, si.company_id, si.text, c.name as company, (1 - (si.embedding <=> $1::vector))::float as score
-       from live.search_index si left join live.companies c on c.id = si.company_id
-      where si.model = $2 order by si.embedding <=> $1::vector limit $3`, [toPgVector(v), model, k]).catch(() => []);
+  const lex = lexicalQuery(question);
+  const select = `select si.kind, si.ref_id, si.company_id, si.text, c.name as company, (1 - (si.embedding <=> $1::vector))::float as score
+       from live.search_index si left join live.companies c on c.id = si.company_id where si.model = $2`;
+  // by meaning and by the question's words over the row text (template / flow / datasource names), fused by rank
+  const [byMeaning, byWords] = await Promise.all([
+    q(`${select} order by si.embedding <=> $1::vector limit $3`, [toPgVector(v), model, k * 2]).catch(() => []),
+    lex.tsquery ? q(`${select} and si.tsv @@ to_tsquery('english', $4) order by ts_rank_cd(si.tsv, to_tsquery('english', $4)) desc limit $3`, [toPgVector(v), model, k * 2, lex.tsquery]).catch(() => []) : [],
+  ]);
+  const id = (r) => `${r.kind}:${r.ref_id}`;
+  const inMeaning = new Set(byMeaning.map(id)), wordsTop = new Set(byWords.slice(0, 2).map(id));
+  const rows = fuseRanks([byMeaning, byWords], id).slice(0, k)
+    .map(r => ({ ...r, via: inMeaning.has(id(r)) ? "meaning" : "words", score: wordsTop.has(id(r)) ? Math.max(Number(r.score), 0.62) : Number(r.score) }));
   return { model, hits: rows.filter(r => Number(r.score) >= min_score).map(r => ({ ...r, score: Number(Number(r.score).toFixed(2)) })) };
 }
 
@@ -718,8 +769,11 @@ export async function screenJourney({ candidateIds, refs = ["main"], from = null
     if (!best || covered > best.covered || (covered === best.covered && p.length > best.path.length)) best = { path: p, covered };
   }
   if (!best) return null;
-  const screens = [];
-  for (const id of best.path) { const v = await screenView({ id, refs }); if (v) screens.push(v); }
+  const found = [];
+  for (const id of best.path) { const v = await screenView({ id, refs }); if (v) found.push(v); }
+  // two route entries can carry the same screen name ("New Event" for /orders/create and its :id variant); the reader
+  // sees one screen, so consecutive duplicates collapse into the first
+  const screens = found.filter((s, i) => i === 0 || s.screen !== found[i - 1].screen);
   const hops = [];
   for (let i = 0; i + 1 < screens.length; i++) {
     const to = screens[i].leads_to.find(l => l.screen === screens[i + 1].screen && l.route_path === screens[i + 1].route_path);

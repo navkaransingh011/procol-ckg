@@ -206,7 +206,7 @@ export default function App() {
             </div>
             {g.active.understoodAs && <p className="understood">understood as: <em>{g.active.understoodAs}</em></p>}
             {g.active.pruned && <p className="note">This answer is older than the retention window, so only its text was kept. Use "ask again" for the full view.</p>}
-            <Answer turn={g.active} asking={g.asking && g.active.id === g.turns[g.turns.length - 1].id} onFeedback={g.feedback} />
+            <Answer turn={g.active} asking={g.asking && g.active.id === g.turns[g.turns.length - 1].id} onFeedback={g.feedback} onRate={g.rateAnswer} />
           </section>
         )}
       </main>
