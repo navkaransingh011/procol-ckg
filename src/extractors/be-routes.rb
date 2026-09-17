@@ -96,6 +96,17 @@ class Recorder
     (frame.mod + [ctrl]).join('/')
   end
 
+  # Ruby 3 hands a BRACELESS hash argument over as keywords even when its keys are not
+  # Symbols, so `get 'path' => 'ctrl#action'` arrives with args empty and opts holding a
+  # String key. Every DSL method below is written to expect that hash positionally; without
+  # folding it back out they match no branch and emit nothing -- silently, with a clean exit
+  # code, which is how ~3,000 routes went missing while the indexer reported success.
+  def unkw(args, opts)
+    nonsym = opts.reject { |k, _| k.is_a?(Symbol) }
+    return [args, opts] if nonsym.empty?
+    [[nonsym, *args], opts.select { |k, _| k.is_a?(Symbol) }]
+  end
+
   def emit(verb, path, to, source: 'explicit')
     ctrl, action = to.to_s.split('#', 2)
     @routes << {
@@ -112,6 +123,7 @@ class Recorder
   # --- the DSL --------------------------------------------------------------
   VERBS.each do |verb|
     define_method(verb) do |*args, **opts, &blk|
+      args, opts = unkw(args, opts)
       spec = args.first
       to   = opts[:to]
       if spec.is_a?(Hash)                       # get 'x' => 'c#a'
@@ -134,16 +146,19 @@ class Recorder
   end
 
   def match(*args, **opts, &blk)
+    args, opts = unkw(args, opts)
     via = Array(opts[:via] || %i[get post])
     via.each { |v| send(v, *args, **opts.reject { |k, _| k == :via }, &blk) }
   end
 
   def root(*args, **opts)
+    args, opts = unkw(args, opts)
     to = opts[:to] || args.first
     emit(:get, current_path, to) if to
   end
 
   def scope(*args, **opts, &blk)
+    args, opts = unkw(args, opts)
     path = opts[:path] || (args.first.is_a?(String) || args.first.is_a?(Symbol) ? args.first : nil)
     push(path: path, mod: opts[:module], constraints: opts[:constraints],
          defaults: opts[:defaults], &blk)
@@ -154,6 +169,8 @@ class Recorder
   end
 
   def constraints(arg = nil, **opts, &blk)
+    (a, opts) = unkw(arg.nil? ? [] : [arg], opts)
+    arg = a.first
     c = arg.is_a?(Hash) ? arg : (opts.empty? ? { lambda: true } : opts)
     push(constraints: c, &blk)
   end
@@ -168,11 +185,18 @@ class Recorder
     names.each { |n| instance_eval(&@concerns[n]) if @concerns&.key?(n) }
   end
 
-  def mount(arg, **opts)
-    if arg.is_a?(Hash)
-      arg.each { |engine, at| @mounts << { 'engine' => engine.to_s, 'at' => at.to_s } }
-    else
-      @mounts << { 'engine' => arg.to_s, 'at' => (opts[:at] || '').to_s }
+  # `mount Rswag::Ui::Engine => '/api-docs'` is the common form, and Ruby 3 hands that
+  # braceless hash over as KEYWORDS, not as a positional argument. A signature of
+  # (arg, **opts) therefore raises "given 0, expected 1" on Ruby 3 for the most ordinary
+  # mount line there is -- and since the rescue below swallows it, the whole file expands
+  # to zero routes with a successful exit code. Accept both shapes.
+  def mount(*args, **opts)
+    pairs = args.first.is_a?(Hash) ? args.first : {}
+    pairs = pairs.merge(opts.reject { |k, _| k == :at })
+    if pairs.any?
+      pairs.each { |engine, at| @mounts << { 'engine' => engine.to_s, 'at' => at.to_s } }
+    elsif args.first
+      @mounts << { 'engine' => args.first.to_s, 'at' => (opts[:at] || '').to_s }
     end
   end
 
@@ -188,10 +212,12 @@ class Recorder
   }.freeze
 
   def resources(*names, **opts, &blk)
+    names, opts = unkw(names, opts)
     names.each { |n| build_resource(n, opts, collection: true, &blk) }
   end
 
   def resource(*names, **opts, &blk)
+    names, opts = unkw(names, opts)
     names.each { |n| build_resource(n, opts, collection: false, &blk) }
   end
 
