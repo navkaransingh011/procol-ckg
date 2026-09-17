@@ -8,12 +8,13 @@
 import { createHash } from "node:crypto";
 import { q, pool } from "./db.mjs";
 import { embed, embedModelId, embedDims, toPgVector } from "./service/embed.mjs";
+import { EMBEDDED_KINDS } from "./embed-kinds.mjs";
 
 const argv = process.argv.slice(2);
 const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i === -1 ? d : argv[i + 1]; };
 const onlyRepo = arg("repo", null);
 const ref = arg("ref", "main");
-const KINDS = arg("kinds", "FEATURE,DOCUMENT,HANDLER,DB_TABLE,HTTP_ENDPOINT,EXTERNAL_SERVICE,HTTP_CALL_SITE,SYMBOL,UI_ROUTE,UI_ACTION").split(",");
+const KINDS = arg("kinds", EMBEDDED_KINDS.join(",")).split(",");
 const LIMIT = Number(arg("limit", "0"));
 
 // "Api::ActivityLogsController#index" -> "api activity logs controller index"

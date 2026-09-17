@@ -13,14 +13,24 @@
 // Usage: node src/quality-check.mjs --repo procol-backend --ref main [--json]
 // Exit code is always 0: this reports, it does not gate. The caller decides what to do.
 import { q } from "./db.mjs";
+import { EMBEDDED_KINDS } from "./embed-kinds.mjs";
 
 // A kind losing this fraction of its rows is worth a human look. Deliberate deletions do
 // shrink a snapshot, so a small drop is normal and only a large one is a signal.
 const DROP_WARN = 0.02;
-// Kinds embed-index builds cards for. An entity of one of these with no vector is invisible
-// to semantic anchoring, and semanticAnchor fails silently -- it returns no matches, not an error.
-const EMBEDDED_KINDS = ["FEATURE", "DOCUMENT", "HANDLER", "DB_TABLE", "HTTP_ENDPOINT",
-                        "EXTERNAL_SERVICE", "HTTP_CALL_SITE", "SYMBOL", "UI_ROUTE", "UI_ACTION"];
+
+/**
+ * Which kinds should carry a vector. EMBEDDED_KINDS is the declared list, shared with
+ * embed-index.mjs so the two cannot drift. It is unioned with the kinds that actually have
+ * embeddings in this database, so a kind embedded through `--kinds` on the command line, or
+ * added by a newer indexer than this checkout, is still coverage-checked rather than ignored.
+ */
+async function embeddableKinds() {
+  const seen = await q(
+    `select distinct e.kind::text kind from ckg.embeddings em join ckg.entities e on e.id = em.entity_id`,
+  ).catch(() => []);
+  return [...new Set([...EMBEDDED_KINDS, ...seen.map((r) => r.kind)])];
+}
 
 /** The newest two commits on a ref, newest first. A fresh ref has only one. */
 async function recentCommits(repo, ref, n = 2) {
@@ -40,13 +50,13 @@ const countsBy = async (table, repoId, sha) =>
   )).map((r) => [r.kind, r.n]));
 
 /** Entities of embeddable kinds on this commit that have no vector. */
-async function unembedded(repoId, sha) {
+async function unembedded(repoId, sha, kinds) {
   const [row] = await q(
     `select count(*) filter (where em.entity_id is null)::int missing, count(*)::int total
        from ckg.entities e
        left join ckg.embeddings em on em.entity_id = e.id
       where e.repo_id = $1 and e.commit_sha = $2 and e.kind::text = any($3)`,
-    [repoId, sha, EMBEDDED_KINDS],
+    [repoId, sha, kinds],
   );
   return row || { missing: 0, total: 0 };
 }
@@ -105,7 +115,7 @@ export async function qualityCheck({ repo, ref }) {
     }
   }
 
-  const emb = await unembedded(now.repo_id, now.commit_sha);
+  const emb = await unembedded(now.repo_id, now.commit_sha, await embeddableKinds());
   out.embeddings = emb;
   // Anything unembedded is worth saying, because the failure mode downstream is silence:
   // semanticAnchor returns zero matches rather than an error, and plain-English questions
