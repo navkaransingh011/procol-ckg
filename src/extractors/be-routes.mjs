@@ -8,7 +8,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const NAME = "be-routes";
-export const VERSION = "1.1-stubdsl";  // 1.1: Rails.env modelled -> env-gated routes now expand
+// 1.2: `mount Engine => '/path'` arrives as KEYWORDS on Ruby 3, which raised inside the stub
+//      and made every routes.rb expand to zero routes with a zero exit code. The version bump
+//      is the cache invalidation: blob_facts is keyed by (blob, extractor, version), so the
+//      empty results already stored under 1.1 are bypassed instead of having to be deleted.
+// 1.1: Rails.env modelled -> env-gated routes now expand
+export const VERSION = "1.2-mount-kwargs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 

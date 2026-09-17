@@ -168,11 +168,18 @@ class Recorder
     names.each { |n| instance_eval(&@concerns[n]) if @concerns&.key?(n) }
   end
 
-  def mount(arg, **opts)
-    if arg.is_a?(Hash)
-      arg.each { |engine, at| @mounts << { 'engine' => engine.to_s, 'at' => at.to_s } }
-    else
-      @mounts << { 'engine' => arg.to_s, 'at' => (opts[:at] || '').to_s }
+  # `mount Rswag::Ui::Engine => '/api-docs'` is the common form, and Ruby 3 hands that
+  # braceless hash over as KEYWORDS, not as a positional argument. A signature of
+  # (arg, **opts) therefore raises "given 0, expected 1" on Ruby 3 for the most ordinary
+  # mount line there is -- and since the rescue below swallows it, the whole file expands
+  # to zero routes with a successful exit code. Accept both shapes.
+  def mount(*args, **opts)
+    pairs = args.first.is_a?(Hash) ? args.first : {}
+    pairs = pairs.merge(opts.reject { |k, _| k == :at })
+    if pairs.any?
+      pairs.each { |engine, at| @mounts << { 'engine' => engine.to_s, 'at' => at.to_s } }
+    elsif args.first
+      @mounts << { 'engine' => args.first.to_s, 'at' => (opts[:at] || '').to_s }
     end
   end
 
