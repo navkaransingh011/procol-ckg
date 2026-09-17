@@ -29,6 +29,11 @@
   ],
   "procol-backend": [
     {
+      "ref": "procol-ckg",
+      "tenant": "shared",
+      "env": "ci"
+    },
+    {
       "ref": "main",
       "tenant": "shared",
       "env": "prod"

@@ -1,5 +1,10 @@
-# Ships this repo's tree to the Procol Code Graph (procol-ckg) on every merge to main, so the
-# agent answers from the code that is actually deployed instead of a stale snapshot.
+# Ships this repo's tree to the Procol Code Graph (procol-ckg) on every push to a tracked ref,
+# so the agent answers from the code that is actually deployed instead of a stale snapshot.
+#
+# Tracked refs are listed twice and both lists must agree: `on.push.branches` below, and
+# config/refs.json ON THE GRAPH VM. The VM's copy is authoritative -- a ref missing there is
+# rejected with 403 no matter what this file says. `procol-ckg` is the pipeline's own branch,
+# so the whole thing can be exercised without merging anything to main.
 #
 # THIS IS THE ONLY FILE THIS PIPELINE ADDS TO THIS REPOSITORY. It reads the checkout CI already
 # has and POSTs it out. It builds nothing, changes no branch, and touches no other workflow.
@@ -31,7 +36,9 @@ name: CKG push tree
 
 on:
   push:
-    branches: [main]
+    # `procol-ckg` first: it is the branch this pipeline lives on until main adopts it.
+    # Both are listed so adopting it later is a merge, not another edit to this file.
+    branches: [procol-ckg, main]
   workflow_dispatch:
 
 concurrency:
