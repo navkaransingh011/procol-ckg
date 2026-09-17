@@ -136,6 +136,21 @@ async function indexJob(job) {
     log(`job ${job.id}: gc (keep ${KEEP}/ref)`);
     await run("node", ["src/gc.mjs", "--keep", String(KEEP)]);
 
+    // Count what landed and compare it with the previous commit on this ref. Every step above
+    // can succeed while a whole layer of the graph goes missing -- an extractor that rescues its
+    // own error and exits 0 produces a "successful" parse holding nothing. Counting is what
+    // catches that, so the result rides back on /status for the workflow to print.
+    log(`job ${job.id}: quality check`);
+    try {
+      const { qualityCheck } = await import("./quality-check.mjs");
+      job.quality = await qualityCheck({ repo: job.repo, ref: job.ref });
+      for (const w of job.quality.warnings || []) log(`job ${job.id}: WARNING ${w}`);
+    } catch (e) {
+      // Never fail an otherwise good index run because the reporting step broke.
+      job.quality = { error: String(e.message || e) };
+      log(`job ${job.id}: quality check failed: ${job.quality.error}`);
+    }
+
     log(`job ${job.id}: done`);
   } finally {
     await fs.rm(work, { recursive: true, force: true }).catch(() => {});
@@ -171,8 +186,8 @@ http.createServer(async (req, res) => {
       ok: true,
       queued: queue.length,
       running,
-      recent: history.map(({ id, repo, ref, sha, state, error, started, finished }) =>
-        ({ id, repo, ref, sha: sha?.slice(0, 8), state, error, started, finished })),
+      recent: history.map(({ id, repo, ref, sha, state, error, started, finished, quality }) =>
+        ({ id, repo, ref, sha: sha?.slice(0, 8), state, error, started, finished, quality })),
     });
   }
 

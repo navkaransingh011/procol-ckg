@@ -179,6 +179,43 @@ curl -fsS -X POST http://127.0.0.1:8788/index -H 'content-type: application/json
 watch -n5 'curl -s http://127.0.0.1:8788/status'
 ```
 
+## The quality report
+
+Every index job ends with `src/quality-check.mjs`, which counts what landed and compares it with
+the previous commit on the same ref. The result rides back on `GET /status`, and the source repo's
+workflow prints it into the job summary, raising a `::warning::` annotation for each regression.
+
+This exists because of a real failure. The Rails route extractor evaluates `routes.rb` against a
+stubbed DSL; Ruby 3 passes a braceless hash argument as keywords where Ruby 2 passed it
+positionally, so `mount Engine => '/path'` raised and `get 'x' => 'c#a'` matched no branch. The
+Ruby script rescued the error and exited 0, `index-commit.mjs` stored the empty result as a
+successful parse, the run reported `ok`, and the workflow went green -- with 3,336 `SERVER_ROUTE`
+and 1,583 `HANDLER` nodes missing. Every individual step succeeded. Only counting catches that.
+
+What it flags:
+
+| Signal | Why it matters |
+|---|---|
+| A kind that existed and is now zero | A whole layer of the graph gone. The loud case. |
+| A kind down more than 2% | Deliberate deletions do shrink a snapshot, so only a real drop is a signal. |
+| Entities with no embedding | `semanticAnchor` returns zero matches rather than an error, so plain-English questions silently lose their starting point. |
+| Extractor parse failures on this tree | `blob_facts` caches failures, so a poisoned entry never retries on its own. |
+
+It reports, it does not gate: the exit code is always 0 and a failing check never fails an index
+run that otherwise worked. A regression is something a person should look at, not a reason to
+discard a snapshot that may still be the best available.
+
+Run it by hand for any ref:
+
+```bash
+node --env-file=.env src/quality-check.mjs --repo procol-backend --ref main
+node --env-file=.env src/quality-check.mjs --repo procol-backend --ref main --json
+```
+
+Clearing a poisoned cache entry is a version bump on the extractor, not a delete: `blob_facts` is
+keyed by `(blob, extractor, version)`, so raising `VERSION` bypasses every stale result for that
+extractor and leaves the rest of the cache hot.
+
 ## Operating it
 
 ```bash

@@ -203,6 +203,61 @@ jobs:
             case "$STATE" in
               ok)
                 echo "indexed $REPO@$REF $SHA" >> "$GITHUB_STEP_SUMMARY"
+                # The graph counts what it stored and compares it against the previous commit on
+                # this ref. Print that, and turn any regression into an annotation: every step of
+                # an index run can succeed while a whole layer goes missing, so a green run is not
+                # by itself evidence that the snapshot is as good as the last one.
+                QSTATUS="$STATUS" QJOB="$JOB" python3 <<'PY' || echo "::warning::could not render the quality report"
+          import json, os, sys
+
+          row = next((r for r in json.loads(os.environ["QSTATUS"]).get("recent", [])
+                      if r.get("id") == os.environ["QJOB"]), None)
+          qa = (row or {}).get("quality") or {}
+          warn = qa.get("warnings") or []
+          out = []
+
+          if not qa:
+              out.append("### Code graph quality\n\nThe graph did not report one for this run.")
+          elif qa.get("error"):
+              out.append("### Code graph quality\n\nNot reported: %s" % qa["error"])
+          else:
+              prev = qa.get("previous")
+              out.append("### Code graph quality - `%s@%s`\n" % (qa.get("repo", ""), qa.get("ref", "")))
+              out.append("Commit `%s` %s\n" % (
+                  (qa.get("commit") or "")[:8],
+                  "compared against `%s`." % prev[:8] if prev
+                  else "is the first snapshot on this ref, so there is nothing to compare against."))
+              for title, rows in (("Entities", qa.get("entities") or []), ("Edges", qa.get("edges") or [])):
+                  if not rows:
+                      continue
+                  moved = [r for r in rows if r.get("delta")]
+                  out.append("**%s** - %d kind%s, %s rows%s\n" % (
+                      title, len(rows), "" if len(rows) == 1 else "s",
+                format(sum(r["now"] for r in rows), ","),
+                      ", %d changed" % len(moved) if prev else ""))
+                  if moved:
+                      out.append("| kind | previous | now | change |")
+                      out.append("|---|---:|---:|---:|")
+                      for r in moved:
+                          out.append("| `%s` | %s | %s | %s%s |" % (
+                              r["kind"], format(r["prev"], ","), format(r["now"], ","),
+                              "+" if r["delta"] > 0 else "", format(r["delta"], ",")))
+                      out.append("")
+              emb = qa.get("embeddings") or {}
+              if emb:
+                  out.append("**Embeddings** - %s of %s embeddable entities carry a vector.\n" % (
+                      format(emb.get("total", 0) - emb.get("missing", 0), ","),
+                      format(emb.get("total", 0), ",")))
+              out.append("**Warnings**\n" if warn
+                         else "No regressions: no kind vanished, nothing shrank beyond noise, "
+                              "and everything embeddable is embedded.")
+              out.extend("- %s" % w for w in warn)
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write("\n".join(out) + "\n")
+          for w in warn:
+              print("::warning title=Code graph regression::%s" % w)
+          PY
                 exit 0 ;;
               failed)
                 printf '%s\n' "$STATUS" >&2
