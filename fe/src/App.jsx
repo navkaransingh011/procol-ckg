@@ -133,7 +133,7 @@ export default function App() {
         <div className="top-left">
           <button type="button" className="tool tool--menu" onClick={toggleSidebar} aria-label={sidebar ? "Hide chats" : "Show chats"} title={sidebar ? "Hide chats" : "Show chats"} aria-expanded={sidebar}>☰</button>
           <button type="button" className="brand" onClick={g.newChat} title="New chat">
-            <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>Code Graph
+            <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>Procol Atlas
           </button>
         </div>
         <div className="top-right">
@@ -158,7 +158,7 @@ export default function App() {
       <main className="stage">
         {!live && (
           <div className="hero">
-            <p className="eyebrow">Procol · Code Graph</p>
+            <p className="eyebrow">Procol · Atlas</p>
             <h1>Ask the <em>knowledge base</em>.</h1>
             <p>{g.me.can?.paths
               ? "Every answer names the file and line that proves it, and says so when it cannot tell."
@@ -167,7 +167,7 @@ export default function App() {
         )}
 
         {offline && (
-          <div className="offline"><span className="offline-dot" aria-hidden="true" />The code graph service is not reachable. Start it with <code>npm run serve</code> in procol-ckg.</div>
+          <div className="offline"><span className="offline-dot" aria-hidden="true" />Procol Atlas is not reachable. Start it with <code>npm run serve</code> in procol-ckg.</div>
         )}
 
         <div className="bar" ref={bar}>

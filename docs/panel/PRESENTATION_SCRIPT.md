@@ -1,8 +1,11 @@
-# Panel presentation script — Procol Code Knowledge Graph
+# Panel presentation script — Procol Atlas
 
 *Spoken script with a live demo. About 18 minutes plus questions. Written 18 September 2026 for Uday Kumar. Text in
 quotes is what to say; text in brackets is what to do or point at. Cut the sections marked OPTIONAL if time is short.
 Numbers are exact as of 17 September; the deck in this folder and `docs/PROJECT_CONTEXT.md` carry the same figures.*
+
+**The name.** The agent and its UI are **Procol Atlas**: a set of maps of one territory — the code, the documents and
+the live platform — with a guide who reads them for you. Say "Atlas" on stage; "the code knowledge graph" is what is underneath.
 
 ---
 
@@ -37,7 +40,7 @@ anything. It reads."
 
 ## 2. What it is, in one breath (1 min)
 
-"It is a Code Knowledge Graph with an AI agent on top. We index three repositories — the Rails backend, the React client
+"Procol Atlas is a Code Knowledge Graph with an AI agent on top. We index three repositories — the Rails backend, the React client
 dashboard and the supplier bidding app — as a graph: which screen calls which endpoint, which handler, which methods,
 which tables. Next to the code we put two more layers: the documents people wrote — PRDs, user guides, process docs —
 and a read-only mirror of the UAT platform database: configuration switches, templates, approval flows, companies."
@@ -128,9 +131,10 @@ the index could not tell us, with the exact file to open."
 
 [Open "Show the evidence path" and switch Flow → Graph → List once.]
 
-"Roles are not a prompt instruction. The service filters what is retrieved, what the model is shown, and every event
-that streams to the browser. A CS answer contains zero file paths by construction; the same question for an engineer
-named twelve."
+"Roles are not a prompt instruction, and they never make an answer thinner. Retrieval is the same for everyone — the
+CS answer was understood from the same source code. What differs is what is shown: the facts are tagged for the writer,
+every event to the browser is filtered, and any code name that slips into the prose is scrubbed before display. A CS
+answer contains zero file paths by construction; the same question for an engineer named twelve."
 
 **Demo 7 — honesty.** Type as CS:
 

@@ -1,5 +1,7 @@
 # procol-ckg — Code Knowledge Graph
 
+*The product built on it — the agent and its UI — is called **Procol Atlas**.*
+
 Deterministic facts about the Procol codebase, keyed to `(repo, commit)`, updated
 incrementally on every merge to a deployed ref.
 

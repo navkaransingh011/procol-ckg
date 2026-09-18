@@ -29,7 +29,7 @@ export default function Login({ cfg, onSignIn, error, busy }) {
     <main className="login">
       <section className="login-card" ref={card} aria-labelledby="login-title">
         <span className="brand-mark brand-mark--lg" aria-hidden="true"><i /><i /><i /></span>
-        <p className="eyebrow">Procol · Code Graph</p>
+        <p className="eyebrow">Procol · Atlas</p>
         <h1 id="login-title">Ask the knowledge base <em>how Procol works</em>.</h1>
         <p className="login-sub">Sign in with your Procol account. Your role decides how much of the code an answer shows.</p>
 
@@ -51,7 +51,7 @@ export default function Login({ cfg, onSignIn, error, busy }) {
         </form>
 
         {error && <p className="login-err" role="alert">{error}</p>}
-        <p className="devnote">No account yet? Ask an engineer on the Code Graph to add you.</p>
+        <p className="devnote">No account yet? Ask an engineer on Procol Atlas to add you.</p>
       </section>
       <p className="login-foot">Only {cfg?.domain || "procol.in"} accounts. Nothing here changes platform data.</p>
     </main>

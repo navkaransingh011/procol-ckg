@@ -1,4 +1,6 @@
-# procol-ckg — project context, laid out as slides
+# Procol Atlas (procol-ckg) — project context, laid out as slides
+
+*The AI agent and its UI are called **Procol Atlas**; the repository and the graph underneath keep the name procol-ckg.*
 
 *17 September 2026. Owner: Uday Kumar (uday.kumar@procol.in). Repo: github.com/navkaransingh011/procol-ckg.*
 
