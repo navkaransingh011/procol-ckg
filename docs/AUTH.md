@@ -14,7 +14,8 @@ Who can open the Code Graph, and how much of the code each person's answers show
 3. **Role**: the `role` column of `ckg.users`, one of the keys in `config/roles.json`. The role is read on every
    request, so a change applies to the person's next question without a new login. Nobody chooses a role in the UI.
 4. **Enforcement** is in the service, not the prompt (`src/service/policy.mjs`), in three places:
-   - retrieval: a role without `code_source` never reads or greps source, so that text never reaches the model;
+   - retrieval is the same for every role: source and greps are read whenever the question needs logic, so a CS answer
+     is understood from the code like an engineer's; `code_source` only decides whether source may be QUOTED;
    - facts: what the answer model receives is redacted to the role's view (code nodes, paths, lines removed);
    - stream: every event to the browser passes the same filter, whatever the model wrote.
    The answer cache is keyed by role, so an engineer's answer never replays for a CS user.

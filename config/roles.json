@@ -1,52 +1,56 @@
 {
-  "_comment": "What each role may see. Enforced in the service (retrieval, facts, and the event stream), not in the prompt. Unknown staff get default_role. Change a role here; nobody edits code for it.",
-  "default_role": "cs",
-  "roles": {
-    "cs": {
-      "label": "Customer success",
-      "style": "simple",
-      "code_names": false,
-      "endpoints": false,
-      "paths": false,
-      "code_source": false,
-      "refs": ["main"]
-    },
-    "product": {
-      "label": "Product",
-      "style": "simple",
-      "code_names": false,
-      "endpoints": false,
-      "paths": false,
-      "code_source": false,
-      "refs": ["main"]
-    },
-    "qa": {
-      "label": "QA",
-      "style": "auto",
-      "code_names": true,
-      "endpoints": true,
-      "paths": false,
-      "code_source": false,
-      "refs": "*"
-    },
-    "engineer": {
-      "label": "Engineer",
-      "style": "auto",
-      "code_names": true,
-      "endpoints": true,
-      "paths": true,
-      "code_source": true,
-      "refs": "*",
-      "admin": true
-    }
+ "_comment": "What each role may SEE. Every role's answer is understood from the same facts, code included; these switches decide presentation (names, endpoints, paths, quoted source) and are enforced in the service -- the facts are tagged, every event is filtered, and code-shaped text in prose or status lines is scrubbed. Unknown staff get default_role. Change a role here; nobody edits code for it.",
+ "default_role": "cs",
+ "roles": {
+  "cs": {
+   "label": "Customer success",
+   "style": "simple",
+   "code_names": false,
+   "endpoints": false,
+   "paths": false,
+   "code_source": false,
+   "refs": [
+    "main"
+   ]
   },
-  "_capabilities": {
-    "style": "simple = always the plain-English answer; auto = the intent router decides (technical for code questions)",
-    "code_names": "class, method, model, job names may appear; false removes every code node from facts and events",
-    "endpoints": "HTTP routes and call sites may appear even when code_names is false",
-    "paths": "file paths and line numbers may appear; false strips them from facts, claims, evidence and prose",
-    "code_source": "the planner may read and grep source; false removes those steps entirely",
-    "refs": "branches the role may ask about; \"*\" = all indexed refs",
-    "admin": "may change roles with src/users.mjs (informational; the CLI runs on the server)"
+  "product": {
+   "label": "Product",
+   "style": "simple",
+   "code_names": false,
+   "endpoints": false,
+   "paths": false,
+   "code_source": false,
+   "refs": [
+    "main"
+   ]
+  },
+  "qa": {
+   "label": "QA",
+   "style": "auto",
+   "code_names": true,
+   "endpoints": true,
+   "paths": false,
+   "code_source": false,
+   "refs": "*"
+  },
+  "engineer": {
+   "label": "Engineer",
+   "style": "auto",
+   "code_names": true,
+   "endpoints": true,
+   "paths": true,
+   "code_source": true,
+   "refs": "*",
+   "admin": true
   }
+ },
+ "_capabilities": {
+  "style": "simple = always the plain-English answer; auto = the intent router decides (technical for code questions)",
+  "code_names": "class, method, model, job names may appear in the answer and the trace; false = they are scrubbed from prose and status lines and code claims/evidence never reach the browser -- the writer still reads them to understand",
+  "endpoints": "HTTP routes and call sites may appear even when code_names is false",
+  "paths": "file paths and line numbers may appear; false strips them from facts, claims, evidence and prose",
+  "code_source": "source code may be QUOTED in the answer; false = the writer still reads source to understand behaviour but describes the logic in words",
+  "refs": "branches the role may ask about; \"*\" = all indexed refs",
+  "admin": "may change roles with src/users.mjs (informational; the CLI runs on the server)"
+ }
 }

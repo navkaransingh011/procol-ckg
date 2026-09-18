@@ -51,6 +51,9 @@ procol-ckg/
     src/components/Background.jsx the graph constellation canvas, now at .55 opacity under the icon field
     src/components/TemplatePreview.jsx  a template's layout (sheet / form / fields) drawn from mirror data, styled like the platform sheet
     src/components/Composer.jsx   the centered input pill: autosize, Enter=send, Shift+Enter=newline, stop button, progress sweep
+    src/lib/usePanZoom.js         diagram pan/zoom: native non-passive wheel (ctrl/cmd+wheel and pinch zoom the diagram, never the page;
+                                  plain wheel scrolls the page, shift+wheel pans), two-pointer pinch, zoomBy about a point
+    src/components/Workflow.jsx   tools: full screen (portal to <body>, esc closes, plain wheel pans there), fit, +, -, double-click zoom
     src/components/Answer.jsx     one-line live timeline (expandable), prose + "Helpful? Yes / No", workflow aside, templates, tables,
                                   a technical answer is split at "2. Evidence path": section 1 (plain words) is the page, the rest folds
                                   under "Technical detail"; the receipt shows the confidence level as a coloured chip,

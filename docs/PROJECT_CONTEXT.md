@@ -121,14 +121,15 @@ so five dashboard branches do not mean five times the embedding work.
 
 **On the slide**
 
-| Role | Style | Code names | Endpoints | File paths | Reads source | Branches |
+| Role | Style | Code names | Endpoints | File paths | Quotes source | Branches |
 |---|---|---|---|---|---|---|
 | CS (default) | plain English | no | no | no | no | `main` |
 | Product | plain English | no | no | no | no | `main` |
 | QA | auto | yes | yes | no | no | all |
 | Engineer | auto | yes | yes | yes | yes | all |
 
-- Enforced in the service on retrieval, facts and the event stream, never by asking the model to hide things
+- Every role's answer is understood from the same facts, code included; the role decides what is SHOWN, enforced in
+  the service on the facts' tags, the event stream and a scrub of the prose, never by asking the model to hide things
 
 **Visual:** the table; optionally two screenshots of the same question as CS and as Engineer.
 

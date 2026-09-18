@@ -589,3 +589,13 @@ kbd { font: 11px/1 var(--mono); padding: 3px 6px; border: 1px solid var(--line-2
 .conf--high::before { background: var(--accent); }
 .conf--medium::before { background: #d9a441; }
 .conf--low::before { background: #d95f43; }
+
+/* Workflow zoom: the diagram zooms, never the page. Tools in a row, a quiet hint, and a full-screen view for big flows. */
+.wf-tools { flex-direction: row; align-items: center; }
+.wf-hint { position: absolute; left: 10px; top: 8px; font-size: 11px; color: var(--ink-3); opacity: 0; transition: opacity .2s; pointer-events: none; max-width: calc(100% - 20px); }
+.wf:hover .wf-hint { opacity: .9; }
+.wf--full { border-radius: 0; box-shadow: none; }
+.wf-overlay { position: fixed; inset: 0; z-index: 1000; background: color-mix(in srgb, var(--bg) 82%, transparent); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); display: flex; align-items: stretch; justify-content: center; padding: 24px; }
+.wf-overlay-panel { display: flex; flex-direction: column; gap: 10px; width: min(1600px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px; overflow: hidden; }
+.wf-overlay-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+@media (max-width: 720px) { .wf-overlay { padding: 8px; } .wf-hint { display: none; } }

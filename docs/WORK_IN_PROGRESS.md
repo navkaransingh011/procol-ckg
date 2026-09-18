@@ -72,6 +72,18 @@ Three changes, in this order, so each is measured by the one before it:
 - Order is eval → reranker → writer, because the eval set makes the other two provable.
 - Nothing is committed by the agent; Uday commits. Live mirror stays read-only.
 
+## 18 Sep — roles decide what is SHOWN, not what is understood
+
+CS answers were thin because retrieval itself was role-gated: no source, no greps, code lookups dropped before the
+writer saw them. Now every role's answer is understood from the same facts (`policy.mjs` `redactFacts` keeps code
+lookups, source, greps and endpoint families; strips paths; tags `presentation` and `may_show_code/endpoints/paths/source`),
+the plain prompt says "understand from the code, explain in product words", and the prose is scrubbed afterwards
+(`codeNamesIn` collects the code names the facts held, `scrubCodeNames` replaces them and code shapes -- `A::B#c`,
+`POST /x`, `/api/...`, directory paths -- and drops any "In the code" line). Status lines no longer list code names for
+those roles ("looking up 8 names in the code"). EXTERNAL_SERVICE names (SAP, HubSpot) count as product words. Cache
+version 6. Measured on the two questions that prompted it: both CS answers went from one or three sentences to six or
+seven specific steps with zero code identifiers. Full eval not re-run yet (`--label roles-read-code`).
+
 ## Open items, in order
 
 1. Have CS confirm the 42 expectations (`verified: false` entries) so the set measures truth, not current behaviour.

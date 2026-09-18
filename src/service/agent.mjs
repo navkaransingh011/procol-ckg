@@ -3,7 +3,7 @@
 // The model's job here is small and bounded: pick tools, then write prose over
 // structured results it cannot edit. It never sees source code and never invents
 // a fact. Everything it can cite came from a deterministic extractor.
-import { redactFacts } from "./policy.mjs";
+import { redactFacts, codeNamesIn, scrubCodeNames } from "./policy.mjs";
 import { FLOW_RULES, wantsFlow, extractFlow } from "./flow.mjs";
 import { needsContext, resolveFollowUp, CONVERSATION_RULE } from "./followup.mjs";
 import { assessConfidence, clearTop } from "./confidence.mjs";
@@ -86,7 +86,7 @@ const norm = (s) => String(s || "").toLowerCase().replace(/[^\p{L}\p{N}#./:_-]+/
  * Cache in front of the real run. Key = question (normalised) + style + the exact commits in scope, so a
  * re-index misses on its own. Replays the stored event stream in ~ms with one leading status line.
  */
-const CACHE_VERSION = 5;   // 5: technical answers lead in plain words, technical sections folded in the UI (4: calibrated confidence, gated side facts)
+const CACHE_VERSION = 6;   // 6: every role understands from the code, presentation scrubbed (5: plain-first technical answers)
 export async function ask({ question: asked, refs = ["main"], emit, style = "auto", fresh = false, policy = null, history = null }) {
   const p0 = provider();
   // Inside a chat, a follow-up is rewritten into a standalone question from what earlier turns made explicit.
@@ -763,6 +763,9 @@ HARD RULES
   sentence such as "This is based on <anchor name>; if you meant something else, name the screen, file or feature."
   When screen_journey is present, the journey is the subject and the fuzzy flag on lookups is irrelevant.
 - Never invent a file, line, method, table, or route. Every named artifact must appear in the facts.
+- facts.may_show_* say what this reader may see. When may_show_source is false, do not quote code lines -- describe
+  the logic in words. When may_show_paths is false, name no file. When may_show_code is false, section 2 onwards
+  describes components in product words. The facts still hold the code so that YOU understand it.
 - If a lookup has match "none", say "no node matched <q>" -- do not fill the gap from general Rails/React knowledge.
 - If "unresolved" is non-empty, say the trace stops there and why.
 - If "truncated" is true or "hubs_not_expanded" is non-empty, say so.
@@ -805,10 +808,23 @@ SHAPE OF THE ANSWER -- always in this order, each part once
    Write the sequence once: never a prose walkthrough AND an arrow list of the same steps.
 3. One line ONLY if the documents and the code differ on something: what the document says, what the code does.
    If they agree, write nothing about agreement. Name the document by its title so they can open it.
-4. Optionally, if the person asked where in the code or how it is enforced: an "In the code" line naming 1-3
-   real files from the facts. Otherwise leave it out.
+4. Only when facts.may_show_code is true AND the person asked where in the code or how it is enforced: an "In the
+   code" line naming 1-3 real files from the facts. Otherwise leave it out -- for a reader who may not see code,
+   never write that line.
 Plain, warm, direct English. Short sentences. No headings, no evidence tables. Product words (an approval, a bid,
 a supplier, a screen) over code words (controller, endpoint, model). Explain any unavoidable term in a few words.
+
+UNDERSTAND FROM THE CODE, EXPLAIN IN PRODUCT WORDS
+- The facts may include source code, class and method names, endpoints, tables and call chains. They are there so
+  you UNDERSTAND exactly what happens -- which condition is checked, what is stored, what fires next -- and can give
+  the same complete, specific answer an engineer would get. Use them fully.
+- Then say it in product words: "the system checks whether the company allows more than one PO on a bid", not
+  "BidMultiplePoHelper#with_multiple_po_lock". Never write a file path, class, method, endpoint, table or job name
+  when facts.may_show_code is false: the reader may not see them, they are removed before display, and a removed
+  name leaves a hole in your sentence. Configuration keys (custom_po_enabled), screen names, template names,
+  document titles and integration names (SAP, HubSpot) are product words and stay.
+- A short answer is not a safe answer. If the facts explain a condition, a rule, an exception or a consequence,
+  say it. "Not covered" is only for what the facts truly do not contain.
 
 CONFIDENCE -- facts.confidence was computed from how the facts were found; your wording follows it
 - "high": state it as fact. No hedging words (seems, appears, may, likely, possibly, I think).
@@ -997,7 +1013,7 @@ function shrink(facts, budget) {
 }
 
 /** Get the answer (one retry with half the facts), strip any path not in the facts, emit it once. */
-async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYSTEM, flow = false }) {
+async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYSTEM, flow = false, scrub = null }) {
   const known = pathsIn(JSON.stringify(facts));
   let text = "", shownJson = "";
   const run = async (json) => {
@@ -1036,9 +1052,12 @@ async function writeAnswer({ question, facts, emit, budget, system = ANSWER_SYST
   const clean = sanitizePaths(split.text, known);
   if (chatStream.lastModel && chatStream.lastModel !== writerModel())
     emit({ type: "status", text: `writer model ${writerModel()} stalled; answered by ${chatStream.lastModel}` });
-  emit({ type: "token", text: clean.text });
+  // roles that may not see code: the writer understood from it, the reader gets product words -- any class, method,
+  // endpoint or table name that slipped into the prose is replaced here, and the "In the code" line is dropped
+  const shown = scrub ? scrubCodeNames(clean.text, scrub) : clean.text;
+  emit({ type: "token", text: shown });
   if (clean.removed) emit({ type: "status", text: `removed ${clean.removed} file path${clean.removed > 1 ? "s" : ""} the model guessed but was not given` });
-  return clean.text;
+  return shown;
 }
 
 /**
@@ -1100,7 +1119,10 @@ async function completeSets(question, results) {
 }
 
 async function planRun({ question, refs, emit, t0, p, intent = "code", policy = null, conversation = null }) {
-  const canSource = !policy || policy.code_source;      // restricted roles never read or grep source
+  // Every role's answer is understood from the code: source and greps are read whenever the question needs logic.
+  // Whether code may be SHOWN is the policy's job (redactFacts tags the facts, the prose is scrubbed afterwards).
+  const canSource = true;
+  const showNames = !policy || policy.code_names;      // status lines name code only for roles that may see it
   // Phase 0: candidates by MEANING. Fails soft when no embeddings exist. The pilot measured this as the
   // difference between 5/8 and 7/8 on questions asked in everyday words.
   let sem = [];
@@ -1167,7 +1189,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
   for (const c of candidates(question).filter(t => IDENTIFIER_RE.test(t))) add(c);            // identifiers only, never plain words
   if (!lookups.length) for (const m of sem.slice(0, 3)) add(m.name || m.fqn);
   const planMs = Date.now() - tPlan;
-  emit({ type: "status", text: `looking up: ${lookups.join(" · ")}` });
+  emit({ type: "status", text: showNames ? `looking up: ${lookups.join(" · ")}` : `looking up ${lookups.length} name${lookups.length === 1 ? "" : "s"} in the code` });
 
   // Phase B: retrieve -- everything independent runs at once
   const tRetrieve = Date.now();
@@ -1333,7 +1355,7 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
     if (/\b(frontend|dashboard|react|redux|ui|browser|client|screen)\b/i.test(question)) grepRepos.add("procol-client-dashboard");
     const jobs = [];
     for (const pat of planGreps) for (const repo of grepRepos) {
-      emit({ type: "status", text: `grep "${pat}" across ${repo}` });
+      emit({ type: "status", text: showNames ? `grep "${pat}" across ${repo}` : `searching the ${repo.includes("dashboard") ? "dashboard" : "backend"} code for one more term` });
       jobs.push(grepSource({ repo, pattern: pat, refs, max_hits: 30, context: 2 }));
     }
     for (const g of await Promise.all(jobs)) if (!g.error && g.total_hits) greps.push(g);
@@ -1447,7 +1469,8 @@ async function planRun({ question, refs, emit, t0, p, intent = "code", policy = 
   const tAnswer = Date.now();
   const drawFlow = wantsFlow(question) && (results.some(r => r.match !== "none") || documents.length > 0 || live.length > 0);
   if (drawFlow) emit({ type: "status", text: "drawing the workflow beside the answer" });
-  await writeAnswer({ question, facts: policy ? redactFacts(facts, policy) : facts, emit, budget: FACTS_BUDGET, system: intent === "simple" ? ANSWER_SIMPLE_SYSTEM : ANSWER_SYSTEM, flow: drawFlow });
+  await writeAnswer({ question, facts: policy ? redactFacts(facts, policy) : facts, emit, budget: FACTS_BUDGET, system: intent === "simple" ? ANSWER_SIMPLE_SYSTEM : ANSWER_SYSTEM, flow: drawFlow,
+                      scrub: policy && !policy.code_names ? codeNamesIn(facts, policy) : null });
   const answerMs = Date.now() - tAnswer;
   await emitRefsFooter(refs, emit);
 

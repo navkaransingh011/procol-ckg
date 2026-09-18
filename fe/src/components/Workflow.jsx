@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { usePanZoom } from "../lib/usePanZoom.js";
 
 /**
@@ -72,9 +73,17 @@ const path = (a, b, isBack, vertical) => {
   return `M${x1},${y1} C${x1},${dip} ${x2},${dip} ${x2},${y2 + 1}`;
 };
 
-export default function Workflow({ flow, active, visited, onSelect, height = 440 }) {
-  const { view, setView, onPointerDown, onPointerMove, onPointerUp, onWheel, wasDrag } = usePanZoom({ min: 0.3, max: 2.2 });
-  const host = useRef(null);
+export default function Workflow({ flow, active, visited, onSelect, height = 440, wheel = "modifier", expandable = true }) {
+  // ctrl/cmd+wheel and pinch zoom the diagram (never the page); drag pans; in the full-screen view plain wheel pans too
+  const { view, setView, zoomBy, hostRef: host, onPointerDown, onPointerMove, onPointerUp, wasDrag } = usePanZoom({ min: 0.3, max: 4, wheel });
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    if (!expanded) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") setExpanded(false); };
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow; document.body.style.overflow = "hidden";   // the page stays put behind the overlay
+    return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+  }, [expanded]);
   const L = useMemo(() => layoutFlow(flow), [flow]);
   const byId = useMemo(() => new Map(flow.steps.map((s) => [s.id, s])), [flow]);
 
@@ -104,8 +113,9 @@ export default function Workflow({ flow, active, visited, onSelect, height = 440
   };
 
   return (
-    <div ref={host} className="wf" style={{ height }}
-         onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerLeave={onPointerUp} onWheel={onWheel}>
+    <div ref={host} className={`wf${expandable ? "" : " wf--full"}`} style={{ height }}
+         onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp} onPointerLeave={onPointerUp}
+         onDoubleClick={(e) => { const r = host.current.getBoundingClientRect(); zoomBy(1.6, { x: e.clientX - r.left, y: e.clientY - r.top }); }}>
       <svg className="wf-svg" width="100%" height={height} role="img" aria-label={`Workflow with ${flow.steps.length} steps`}>
         <defs>
           <marker id="wf-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9" className="wf-arrowhead" /></marker>
@@ -148,12 +158,26 @@ export default function Workflow({ flow, active, visited, onSelect, height = 440
           })}
         </g>
       </svg>
-      <div className="wf-tools">
-        <button type="button" className="tool" onClick={fit} title="Fit">⤢</button>
-        <button type="button" className="tool" onClick={() => setView((v) => ({ ...v, k: Math.min(2.2, v.k * 1.2) }))} title="Zoom in">+</button>
-        <button type="button" className="tool" onClick={() => setView((v) => ({ ...v, k: Math.max(0.3, v.k / 1.2) }))} title="Zoom out">−</button>
+      <div className="wf-tools" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+        {expandable && <button type="button" className="tool" onClick={() => setExpanded(true)} title="Open full screen">⛶</button>}
+        <button type="button" className="tool" onClick={fit} title="Fit to view">⤢</button>
+        <button type="button" className="tool" onClick={() => zoomBy(1.25)} title="Zoom in">+</button>
+        <button type="button" className="tool" onClick={() => zoomBy(1 / 1.25)} title="Zoom out">−</button>
       </div>
+      <div className="wf-hint" aria-hidden="true">{wheel === "always" ? "scroll to pan · ⌘/ctrl + scroll or pinch to zoom · double-click to zoom in · esc to close" : "drag to pan · ⌘/ctrl + scroll or pinch to zoom · double-click to zoom in"}</div>
       {byId.get(active) && <div className="wf-caption"><b>{active.slice(1)}</b> {byId.get(active).label}{byId.get(active).ref ? <span className="wf-ref"> · {byId.get(active).ref}</span> : null}</div>}
+      {/* Full-screen view for a diagram too big for its box: the same drawing, the whole viewport, plain scroll pans. Portalled
+          to <body> so a transformed ancestor (the sidebar glide) cannot pin it in place. */}
+      {expanded && createPortal(
+        <div className="wf-overlay" role="dialog" aria-modal="true" aria-label="Workflow, full screen" onClick={(e) => { if (e.target === e.currentTarget) setExpanded(false); }}>
+          <div className="wf-overlay-panel">
+            <div className="wf-overlay-head">
+              <span className="label">Workflow · {flow.steps.length} steps</span>
+              <button type="button" className="ghost ghost--sm" onClick={() => setExpanded(false)}>close · esc</button>
+            </div>
+            <Workflow flow={flow} active={active} visited={visited} onSelect={onSelect} height={Math.max(320, window.innerHeight - 132)} wheel="always" expandable={false} />
+          </div>
+        </div>, document.body)}
     </div>
   );
 }
